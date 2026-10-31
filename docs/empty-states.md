@@ -17,10 +17,16 @@
 
 部分 TV 输入法即使隐藏也会吞掉/延迟遥控键，单靠控件监听器仍不足。搜索页在浏览模式
 通过根布局的 `dispatchKeyEventPreIme` 将方向、确定和 Back 交给现有 Activity/View 分发；
-未处理的方向键沿实际焦点树移动。同一个设备/按键/downTime 的 DOWN、重复和 UP
+未处理的方向键沿实际焦点树移动。键盘的可见 frame 还在全局布局变化时更新，不仅依赖全屏根布局的尺寸变化或下一次按键。
+同一个设备/按键/downTime 的 DOWN、重复和 UP
 固定归同一端，避免键盘恰好显隐时丢失确认键或拆分 Back。窗口失焦清除未完成键序列。
 此逻辑仅作用于搜索页，不改变结果加载、offset 或重试次数。
 
+输入框用于打开键盘的确定/Enter 完整消费 DOWN/重复/UP，只在匹配且未取消的 UP
+打开，避免只消费 UP、让另一半继续进入其他编辑/输入法分发路径；不猜测特定 IME 的内部实现。
+用户明确按确定/点击时以 `showSoftInput(..., 0)` 正常请求键盘，不用可被忽略的
+`SHOW_IMPLICIT`，也不用可能跨窗口保留的 `SHOW_FORCED`；合同见
+[InputMethodManager](https://developer.android.com/reference/android/view/inputmethod/InputMethodManager#SHOW_IMPLICIT)。
 在输入框按确定/点击后，显式键盘请求（包括尚未显示或浮动键盘）及观测到的可见键盘
 仍拥有按键，不抢走键盘中的方向选择。Back 先收键盘，IME 的 Search/Done 动作收键盘，
 之后方向键恢复浏览；显示请求被拒绝/报告保持隐藏时也恢复，不用固定短延时猜测失败。
@@ -60,9 +66,18 @@
 `EmptyStateDeviceTest` 使用进程内 loopback 合成服务，覆盖真实 Activity、遥控重试、
 抽屉/输入焦点和页面恢复，并保存截图。搜索回归覆盖提示/无结果/503/401/403 的下移和
 确定重试、上移返回输入、加载时隐藏按钮不可达、取消旧失败、正常结果及追加失败原 offset
-重试；使用真实按键分发，不直接调用 Activity 的 `onKeyDown` 来冒充遥控。
-显式键盘用例（API21+）读取专用模拟器的 `dumpsys input_method` 确认可见，验证
-确定打开、键盘方向选择、Back 收起和恢复重试焦点；Search 动作部分调用实际 editor
+重试；使用系统 `sendKeySync` 注入真实按键分发，不直接调用 Activity 的 `onKeyDown`。
+同一手势 DOWN/UP 显式共用一次 `downTime` 与设备 ID，UP 的事件时刻单独更新。
+不能用 API29 的 `sendKeyDownUpSync` 验证严格成对手势：它会分别给两个零时间事件
+补时间，可能变成不同 `downTime`，从而被生产代码正确拒绝为孤立 UP。依据见
+[Android10 Instrumentation](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-10.0.0_r1/core/java/android/app/Instrumentation.java#L984-L1012)。
+显式键盘用例（API21+）同时检查 `dumpsys input_method` 和专用 TV 停靠键盘带来的
+窗口可见 frame 收缩/复原，并保存截图人工核实；不能把服务 shown 标志当成已绘制键盘。
+该 TV 输入法的 accessibility root 不可靠，不将其作为必须通过的窗口可见性条件。
+这不是浮动/overlay IME 的覆盖；不修改设备输入法设置，也不在测试中重置键盘状态。验证
+确定打开时查询不变、键盘方向选择、Back 收起和恢复重试焦点；隐藏验证同时等待
+系统状态、窗口可见 frame 和浏览按键归属恢复，不将隐藏动画开始当作动画结束。
+Search 动作部分调用实际 editor
 回调验证收起接线，不声称覆盖各厂商键盘的 Search 按钮布局。
 仅在专用合成模拟器运行：
 

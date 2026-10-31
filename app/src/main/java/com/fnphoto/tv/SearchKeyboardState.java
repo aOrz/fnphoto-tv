@@ -9,6 +9,9 @@ final class SearchKeyboardState {
     private boolean visible;
     private int requestGeneration;
     private final Map<Long, KeyOwner> keys = new HashMap<>();
+    private final Map<Long, Long> keyboardOpenKeys = new HashMap<>();
+
+    enum OpenKey { PASS, CONSUME, OPEN }
 
     int request() { requested = true; return ++requestGeneration; }
     void dismiss() { requested = false; requestGeneration++; }
@@ -45,7 +48,26 @@ final class SearchKeyboardState {
         return false; // Never intercept an orphan up from the IME/another window.
     }
 
-    void clearKeys() { keys.clear(); }
+    /** Keep both halves of the editor opening gesture together; open only on its valid UP. */
+    OpenKey handleKeyboardOpenKey(int deviceId, int keyCode, long downTime,
+            boolean down, boolean up, boolean canceled) {
+        long key = ((long) deviceId << 32) | (keyCode & 0xffffffffL);
+        Long held = keyboardOpenKeys.get(key);
+        boolean matches = held != null && held == downTime;
+        if (down && !matches) keyboardOpenKeys.remove(key);
+        if (down && (matches || routesRemoteKeys())) {
+            keyboardOpenKeys.put(key, downTime);
+            return OpenKey.CONSUME;
+        }
+        if (up && matches) {
+            keyboardOpenKeys.remove(key);
+            return canceled ? OpenKey.CONSUME : OpenKey.OPEN;
+        }
+        // An orphan browse UP must not activate TextView's default keyboard handling either.
+        return up && routesRemoteKeys() ? OpenKey.CONSUME : OpenKey.PASS;
+    }
+
+    void clearKeys() { keys.clear(); keyboardOpenKeys.clear(); }
 
     private static final class KeyOwner {
         final long downTime;

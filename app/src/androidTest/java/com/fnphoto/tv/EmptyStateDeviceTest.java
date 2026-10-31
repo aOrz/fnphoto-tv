@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -361,14 +362,23 @@ public class EmptyStateDeviceTest {
         fixture.respond(SEARCH, 503, "{\"code\":503}");
         ui(() -> { input.setText("synthetic-keyboard"); return null; });
         await(() -> title(search).equals("搜索失败"));
+        final Rect browseFrame = ui(() -> visibleFrame(search));
         key(KeyEvent.KEYCODE_DPAD_CENTER);
+        System.out.println("Search IME open requested: " + ui(() -> keyboardSnapshot(search)));
         awaitImeShown(true);
+        awaitImeFrame(true, search, browseFrame);
+        System.out.println("Search IME shown frame=" + ui(() -> visibleFrame(search))
+                + "; browse frame=" + browseFrame);
+        assertEquals("Opening the keyboard must not type the selected key", "synthetic-keyboard",
+                ui(() -> input.getText().toString()));
         screenshot("search-explicit-keyboard");
         key(KeyEvent.KEYCODE_DPAD_DOWN);
         assertTrue("Visible keyboard owns Down, not the retry action", ui(input::hasFocus));
         assertFalse(ui(() -> action(search).hasFocus()));
         key(KeyEvent.KEYCODE_BACK);
         awaitImeShown(false);
+        awaitImeFrame(false, search, browseFrame);
+        awaitKeyboardBrowse(search, browseFrame);
         assertFalse("First Back hides the keyboard, not Search", ui(search::isFinishing));
         key(KeyEvent.KEYCODE_DPAD_DOWN);
         await(() -> action(search).hasFocus());
@@ -377,9 +387,14 @@ public class EmptyStateDeviceTest {
         await(input::hasFocus);
         key(KeyEvent.KEYCODE_DPAD_CENTER);
         awaitImeShown(true);
+        awaitImeFrame(true, search, browseFrame);
+        assertEquals("Reopening the keyboard must not type", "synthetic-keyboard",
+                ui(() -> input.getText().toString()));
         // Exercise the IME action callback, not a fabricated Activity.onKeyDown event.
         ui(() -> { input.onEditorAction(EditorInfo.IME_ACTION_SEARCH); return null; });
         awaitImeShown(false);
+        awaitImeFrame(false, search, browseFrame);
+        awaitKeyboardBrowse(search, browseFrame);
         key(KeyEvent.KEYCODE_DPAD_DOWN);
         await(() -> action(search).hasFocus());
         screenshot("search-keyboard-action-remote-retry");
@@ -387,11 +402,55 @@ public class EmptyStateDeviceTest {
         await(search::isFinishing);
     }
 
+    private void awaitImeFrame(boolean expected, SearchActivity search, Rect browseFrame) throws Exception {
+        // On this dedicated docked-TV-IME fixture, shown=true is only a request flag. The
+        // window frame must actually shrink/restore too; screenshots provide pixel evidence.
+        // Floating/overlay IMEs need a different device scenario, not a relaxed assertion here.
+        int keyboardThreshold = ui(() -> (int) (100 * search.getResources().getDisplayMetrics().density));
+        try {
+            await(() -> expected
+                    ? browseFrame.bottom - visibleFrame(search).bottom > keyboardThreshold
+                    : browseFrame.equals(visibleFrame(search)));
+            System.out.println("Search IME frame-visible=" + expected + "; "
+                    + ui(() -> keyboardSnapshot(search)));
+        } catch (AssertionError timeout) {
+            throw new AssertionError("IME window frame did not become " + expected + "; "
+                    + ui(() -> keyboardSnapshot(search)), timeout);
+        }
+    }
+
+    private String keyboardSnapshot(SearchActivity search) throws Exception {
+        SearchKeyboardState state = (SearchKeyboardState) field(search, "keyboardState");
+        return "frame=" + visibleFrame(search) + ", requested=" + field(state, "requested")
+                + ", visible=" + field(state, "visible") + ", browse=" + state.routesRemoteKeys();
+    }
+
+    private Rect visibleFrame(SearchActivity search) {
+        Rect frame = new Rect();
+        search.getWindow().getDecorView().getWindowVisibleDisplayFrame(frame);
+        return frame;
+    }
+
+    private void awaitKeyboardBrowse(SearchActivity search, Rect browseFrame) throws Exception {
+        // The system flag switches before the IME hide animation/insets finish. Wait for the
+        // actual window AND app ownership to settle, without sending a second navigation key.
+        SearchKeyboardState state = ui(() -> (SearchKeyboardState) field(search, "keyboardState"));
+        try {
+            await(() -> browseFrame.equals(visibleFrame(search)) && state.routesRemoteKeys());
+            System.out.println("Search IME hidden; window and browse ownership restored: " + browseFrame);
+        } catch (AssertionError timeout) {
+            throw new AssertionError("Keyboard browse not restored: " + ui(() ->
+                    "frame=" + visibleFrame(search) + ", expected=" + browseFrame
+                            + ", requested=" + field(state, "requested")
+                            + ", visible=" + field(state, "visible")), timeout);
+        }
+    }
+
     @android.annotation.TargetApi(21)
     private void awaitImeShown(boolean expected) throws Exception {
         long deadline = SystemClock.uptimeMillis() + 15000;
         while (SystemClock.uptimeMillis() < deadline) {
-            // Dedicated emulator only. Inspect the system's visible IME state, not app booleans.
+            // System request flag only: callers also await actual window frame and capture pixels.
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     new ParcelFileDescriptor.AutoCloseInputStream(instrumentation.getUiAutomation()
                             .executeShellCommand("dumpsys input_method"))))) {
@@ -495,7 +554,17 @@ public class EmptyStateDeviceTest {
     }
 
     private void key(int code) {
-        instrumentation.sendKeyDownUpSync(code);
+        // API29's sendKeyDownUpSync separately fills two zero downTimes. A real gesture
+        // shares one downTime, including when DOWN processing spans more than a millisecond.
+        long downTime = SystemClock.uptimeMillis();
+        KeyEvent down = new KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN, code, 0);
+        instrumentation.sendKeySync(down);
+        KeyEvent up = new KeyEvent(downTime, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0);
+        assertEquals("Injected gesture must share downTime", down.getDownTime(), up.getDownTime());
+        assertEquals("Injected gesture must share device", down.getDeviceId(), up.getDeviceId());
+        System.out.println("Injected remote pair key=" + code + ", device=" + down.getDeviceId()
+                + ", downTime=" + down.getDownTime() + ", up.downTime=" + up.getDownTime());
+        instrumentation.sendKeySync(up);
         instrumentation.waitForIdleSync();
     }
 

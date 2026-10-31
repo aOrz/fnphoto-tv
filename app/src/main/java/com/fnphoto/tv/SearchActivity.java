@@ -16,6 +16,7 @@ import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
@@ -110,6 +111,19 @@ public class SearchActivity extends FragmentActivity {
     private void initViews() {
         LinearLayout rootLayout = new LinearLayout(this) {
             private final Rect visibleFrame = new Rect();
+            private final ViewTreeObserver.OnGlobalLayoutListener keyboardLayoutListener = this::observeKeyboard;
+
+            @Override protected void onAttachedToWindow() {
+                super.onAttachedToWindow();
+                getViewTreeObserver().addOnGlobalLayoutListener(keyboardLayoutListener);
+                observeKeyboard();
+            }
+
+            @Override protected void onDetachedFromWindow() {
+                ViewTreeObserver observer = getViewTreeObserver();
+                if (observer.isAlive()) observer.removeOnGlobalLayoutListener(keyboardLayoutListener);
+                super.onDetachedFromWindow();
+            }
 
             // Old androidx.core annotates the public Activity/Window.Callback override restricted.
             // This calls that public framework entry point, not a private AndroidX helper.
@@ -278,10 +292,15 @@ public class SearchActivity extends FragmentActivity {
                 }
                 boolean isOk = keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                         || keyCode == KeyEvent.KEYCODE_ENTER;
-                if (isOk && event.getAction() == KeyEvent.ACTION_UP
-                        && keyboardState.routesRemoteKeys()) {
-                    showKeyboard();
-                    return true;
+                if (isOk) {
+                    // Keep the opening gesture together: forwarding its DOWN elsewhere while
+                    // consuming only UP leaves the editor/IME with an unmatched gesture.
+                    SearchKeyboardState.OpenKey result = keyboardState.handleKeyboardOpenKey(
+                            event.getDeviceId(), keyCode, event.getDownTime(),
+                            event.getAction() == KeyEvent.ACTION_DOWN,
+                            event.getAction() == KeyEvent.ACTION_UP, event.isCanceled());
+                    if (result == SearchKeyboardState.OpenKey.OPEN) showKeyboard();
+                    return result != SearchKeyboardState.OpenKey.PASS;
                 }
                 return false;
             }
@@ -327,8 +346,10 @@ public class SearchActivity extends FragmentActivity {
         android.view.inputmethod.InputMethodManager imm =
                 (android.view.inputmethod.InputMethodManager)
                         getSystemService(Context.INPUT_METHOD_SERVICE);
+        // Center/click is an explicit user request. IMPLICIT may be ignored after dismissal;
+        // flags=0 requests normally, without FORCED's cross-window persistence.
         boolean accepted = imm != null && imm.showSoftInput(editSearch,
-                android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT,
+                0,
                 new ResultReceiver(new Handler(Looper.getMainLooper())) {
                     @Override protected void onReceiveResult(int resultCode, Bundle resultData) {
                         if (resultCode == android.view.inputmethod.InputMethodManager.RESULT_UNCHANGED_HIDDEN

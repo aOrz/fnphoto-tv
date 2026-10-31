@@ -119,4 +119,58 @@ public class SearchKeyboardStateTest {
         state.request();
         assertFalse(state.shouldHideInitialKeyboard());
     }
+    @Test public void editorConsumesOpeningDownAndRepeatsBeforeOpeningOnUp() {
+        SearchKeyboardState state = new SearchKeyboardState();
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 23, 10, true, false, false));
+        state.observeVisibility(true);
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 23, 10, true, false, false));
+        assertEquals(SearchKeyboardState.OpenKey.OPEN,
+                state.handleKeyboardOpenKey(1, 23, 10, false, true, false));
+    }
+
+    @Test public void canceledOrOrphanEditorUpCannotOpenKeyboard() {
+        SearchKeyboardState state = new SearchKeyboardState();
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 66, 10, false, true, false));
+        state.handleKeyboardOpenKey(1, 66, 11, true, false, false);
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 66, 11, false, true, true));
+        state.handleKeyboardOpenKey(1, 66, 12, true, false, false);
+        state.clearKeys();
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 66, 12, false, true, false));
+    }
+
+    @Test public void imeOwnedConfirmPassesWithoutOpeningAnotherKeyboard() {
+        SearchKeyboardState state = new SearchKeyboardState();
+        state.request();
+        assertEquals(SearchKeyboardState.OpenKey.PASS,
+                state.handleKeyboardOpenKey(1, 23, 10, true, false, false));
+        assertEquals(SearchKeyboardState.OpenKey.PASS,
+                state.handleKeyboardOpenKey(1, 23, 10, false, true, false));
+    }
+
+    @Test public void editorOpenKeyMustMatchDeviceKeyAndDownTime() {
+        SearchKeyboardState state = new SearchKeyboardState();
+        state.handleKeyboardOpenKey(1, 23, 10, true, false, false);
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(2, 23, 10, false, true, false));
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 66, 10, false, true, false));
+        assertEquals(SearchKeyboardState.OpenKey.CONSUME,
+                state.handleKeyboardOpenKey(1, 23, 11, false, true, false));
+        assertEquals(SearchKeyboardState.OpenKey.OPEN,
+                state.handleKeyboardOpenKey(1, 23, 10, false, true, false));
+    }
+    @Test public void newerImeDownDiscardsAnUnfinishedBrowseOpeningKey() {
+        SearchKeyboardState state = new SearchKeyboardState();
+        state.handleKeyboardOpenKey(1, 23, 10, true, false, false);
+        state.request();
+        assertEquals(SearchKeyboardState.OpenKey.PASS,
+                state.handleKeyboardOpenKey(1, 23, 11, true, false, false));
+        assertEquals(SearchKeyboardState.OpenKey.PASS,
+                state.handleKeyboardOpenKey(1, 23, 10, false, true, false));
+    }
 }
