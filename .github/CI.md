@@ -17,12 +17,16 @@ bash ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
 bash ./gradlew --no-daemon --stacktrace :app:assembleDebug
 bash ./gradlew --no-daemon --stacktrace :app:lintDebug
 python -m pip install -r test/requirements-contract.txt
-python -m unittest discover -s test -p test_mock_contract.py -v
+python -m unittest discover -s test -p 'test_*.py' -v
 ```
 
 No emulator, NAS, or account credentials are needed. The Python contract suite
-checks the mock's pagination, date/person/folder parameter names and idempotent
-collection writes. The other `test/` Python scripts are manual mock-server tools.
+checks pagination, date/person/folder names, idempotent collection writes, the
+fixed 360-item fixture over ephemeral local HTTP/WebSocket connections, video
+failure controls and byte ranges, media generation, and the screenshot helper
+with synthetic images (no device). CI installs FFmpeg/ffprobe and exercises short
+H264/AAC generation; generated media stays temporary and is not uploaded.
+See [test/README.md](../test/README.md) for local dependencies and device scenarios.
 
 Open a run in the repository's **Actions** tab to download the debug APK and
 JUnit XML/HTML test reports. Artifacts expire after 14 days. Test reports are
@@ -67,5 +71,4 @@ Install JDK 11 and Android SDK packages `platforms;android-29` and
 above from the repository root. No global Gradle installation or CI init script
 is required. The Gradle/AGP versions are intentionally unchanged by this CI work.
 
-Stacked functional PRs targeting `perf/progressive-loading` also run this workflow;
-this does not add push/deploy permissions or auto-merge behavior.
+The temporary stacked-PR trigger was removed after the performance PR merged.

@@ -32,3 +32,9 @@ AGENTS.md
 .venv
 __pycache__/
 *.pyc
+
+# Locally generated synthetic QA media, TLS material, screenshots and traces
+/test/.generated/
+/test/test_key.pem
+/test/test_cert.pem
+/test/test_video.mp4
