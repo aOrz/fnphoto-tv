@@ -70,6 +70,8 @@ public class MainFragment extends BrowseSupportFragment {
     private String geoBoundaryMessage;
     private String photoFailureMessage;
     private String albumFailureMessage;
+    private int photoFailureHttpStatus;
+    private int albumFailureHttpStatus;
     private MainPagingState albumPaging;
     private boolean applyingPage;
     private int lastFilteredAutoIndex;
@@ -186,13 +188,13 @@ public class MainFragment extends BrowseSupportFragment {
     private void rootLoadSucceeded() {
         if (rootBrowseLoaded) return;
         rootBrowseLoaded = true;
-        if (mRowsAdapter.size() == 0) showEmptyState("暂无内容");
+        if (mRowsAdapter.size() == 0) showRootEmptyState();
         if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).onBrowseModeLoaded(rootBrowseMode);
         focusBrowseContent();
     }
 
     private void rootLoadFailed() {
-        rootLoadFailed("加载失败，按确定重试，或按菜单切换浏览类型");
+        rootLoadFailed(BrowseStatus.httpFailure(0));
     }
 
     private void rootLoadFailed(Throwable error) {
@@ -203,11 +205,15 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void rootLoadFailed(String message) {
+        rootLoadFailed(new BrowseStatus("加载失败", message));
+    }
+
+    private void rootLoadFailed(BrowseStatus status) {
         hideLoadingOverlay();
-        showEmptyState(message);
-        ArrayObjectAdapter retry = new ArrayObjectAdapter(mCardPresenter);
-        retry.add(new MediaItem("__root_retry", "重新加载" + rootBrowseMode.title, "root_retry", null, null));
-        mRowsAdapter.add(new ListRow(new HeaderItem("重试"), retry));
+        mRowsAdapter.clear();
+        showState(status, "重试", () -> {
+            if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).retryBrowseMode(rootBrowseMode);
+        });
         rootRequestFailed();
     }
 
@@ -222,6 +228,7 @@ public class MainFragment extends BrowseSupportFragment {
             if (!requests.isCurrent(generation) || !(getActivity() instanceof MainActivity)) return;
             MainActivity activity = (MainActivity) getActivity();
             if (!activity.canFocusBrowseContent()) return;
+            if (activity.focusBrowseState()) return;
             boolean hasCards = false;
             for (int i = 0; i < mRowsAdapter.size(); i++) {
                 Object row = mRowsAdapter.get(i);
@@ -270,6 +277,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void beginScreen() {
+        clearState();
         reflowingWall = false;
         selectedWallItem = null;
         requests.next();
@@ -725,7 +733,7 @@ public class MainFragment extends BrowseSupportFragment {
                     displayTimeline(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
@@ -815,7 +823,7 @@ public class MainFragment extends BrowseSupportFragment {
                     displayFolders(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.FolderListResponse> call, Throwable error) {
@@ -926,6 +934,7 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
         albumFailureMessage = null;
+        albumFailureHttpStatus = 0;
         updatePageFooter(albumPaging, savedAlbumList.size());
         String params = "sort_direction=desc&sort_by=date_time&offset=" + offset + "&limit=" + PAGE_SIZE;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/list", "GET", params);
@@ -937,6 +946,8 @@ public class MainFragment extends BrowseSupportFragment {
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || !validPage(result.data.list, PAGE_SIZE)) {
                     albumPaging.fail();
+                    albumFailureHttpStatus = response.code();
+                    albumFailureMessage = BrowseStatus.httpFailure(response.code()).message;
                 } else {
                     List<String> ids = new ArrayList<>();
                     for (FnHttpApi.NewAlbum album : result.data.list) ids.add(String.valueOf(album.albumId));
@@ -1013,6 +1024,7 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
         albumFailureMessage = null;
+        albumFailureHttpStatus = 0;
         updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
         String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.LIST_PATH, "GET",
                 SharedAlbumSupport.listQuery(offset));
@@ -1024,6 +1036,8 @@ public class MainFragment extends BrowseSupportFragment {
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || !validPage(result.data.list, SharedAlbumSupport.ALBUM_PAGE_SIZE)) {
                     sharedAlbumPaging.fail();
+                    albumFailureHttpStatus = response.code();
+                    albumFailureMessage = BrowseStatus.httpFailure(response.code()).message;
                 } else {
                     List<String> ids = new ArrayList<>();
                     for (FnHttpApi.SharedAlbum album : result.data.list) {
@@ -1316,7 +1330,7 @@ public class MainFragment extends BrowseSupportFragment {
                 FnHttpApi.TimelineResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || result.data.list == null || result.data.list.contains(null)) {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                     return;
                 }
                 TimelineDateRange range = new TimelineDateRange();
@@ -1327,7 +1341,7 @@ public class MainFragment extends BrowseSupportFragment {
                     }
                 }
                 if (range.isEmpty()) {
-                    showEmptyState("暂无" + title);
+                    showRootEmptyState();
                     rootLoadSucceeded();
                     return;
                 }
@@ -1375,11 +1389,11 @@ public class MainFragment extends BrowseSupportFragment {
                 FnHttpApi.TimelineResponse result = response.body();
                 if (response.isSuccessful() && result != null && result.code == 0
                         && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
-                    if (result.data.list.isEmpty()) showEmptyState("暂无收藏");
+                    if (result.data.list.isEmpty()) showRootEmptyState();
                     else displayTimeline(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
@@ -1408,7 +1422,7 @@ public class MainFragment extends BrowseSupportFragment {
                     displayTimeline(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
@@ -1438,7 +1452,7 @@ public class MainFragment extends BrowseSupportFragment {
                     displayPlaces(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.GeoListResponse> call, Throwable error) {
@@ -1486,14 +1500,24 @@ public class MainFragment extends BrowseSupportFragment {
         if (placesLimited) addUnpagedLimitNotice("地点目录");
     }
 
-    private void showEmptyState(String message) {
-        isPhotoListView = true;
-        timelineItems = null;
-        mRowsAdapter.clear();
+    private void showRootEmptyState() {
+        showState(BrowseStatus.empty(rootBrowseMode), "浏览其他内容", this::openBrowseMenu);
+    }
 
-        HeaderItem header = new HeaderItem(message);
-        ArrayObjectAdapter listRowAdapter = new ArrayObjectAdapter(mCardPresenter);
-        mRowsAdapter.add(new ListRow(header, listRowAdapter));
+    private void openBrowseMenu() {
+        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).openBrowseMenu();
+    }
+
+    private void showState(BrowseStatus status, String action, Runnable onAction) {
+        if (!(getActivity() instanceof MainActivity)) return;
+        final long generation = requests.generation();
+        ((MainActivity) getActivity()).showBrowseState(status.title, status.message, action, () -> {
+            if (requests.isCurrent(generation)) onAction.run();
+        });
+    }
+
+    private void clearState() {
+        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).clearBrowseState();
     }
 
     private List<FnHttpApi.NewAlbum> savedAlbumList;
@@ -1547,6 +1571,7 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
         photoFailureMessage = null;
+        photoFailureHttpStatus = 0;
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
         if ("shared_album".equals(photoMode)) {
@@ -1584,6 +1609,8 @@ public class MainFragment extends BrowseSupportFragment {
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || !validPage(result.data.list, photoPaging.getPageSize())) {
                     photoPaging.fail();
+                    photoFailureHttpStatus = response.code();
+                    photoFailureMessage = BrowseStatus.httpFailure(response.code()).message;
                     finishPhotoPage(false);
                     if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
                     return;
@@ -1662,17 +1689,9 @@ public class MainFragment extends BrowseSupportFragment {
         }
     }
 
-    private void showRootLoadFailure(Throwable error) {
-        Log.e(TAG, "元数据加载失败", error);
-        hideLoadingOverlay();
-        showEmptyState(isMetadataLimit(error)
-                ? "响应超过安全大小，未显示结果；请改用相册、文件夹或搜索缩小范围"
-                : "加载失败，请重新选择此分类重试");
-    }
-
     private boolean rejectInvalidMetadata(List<?> rows) {
         if (rows != null && !rows.contains(null)) return false;
-        showEmptyState("服务器返回无效条目；未显示结果，请重新选择此分类重试");
+        rootLoadFailed("服务器返回无效条目，未显示结果；请重试或切换浏览方式");
         return true;
     }
 
@@ -1786,7 +1805,10 @@ public class MainFragment extends BrowseSupportFragment {
         else if (state.hasInvalidPage()) status = "响应异常 · 确定重试";
         else if (state.hasFailed()) {
             String reason = state == photoPaging ? photoFailureMessage : albumFailureMessage;
-            status = reason != null ? "响应过大 · 缩小范围或确定重试" : "确定：重试（本批 " + count + " 项）";
+            status = reason != null && reason.startsWith("响应超过")
+                    ? "响应过大 · 缩小范围或确定重试"
+                    : BrowseStatus.httpFailure(state == photoPaging ? photoFailureHttpStatus : albumFailureHttpStatus).title
+                            + " · 确定重试（本批 " + count + " 项）";
         }
         else if (state.isStalled()) status = "结果可能不完整 · 请返回";
         else if (isWindowFull(state, count)) status = "确定：下一批（替换本批" + count + "项）";
@@ -1804,6 +1826,59 @@ public class MainFragment extends BrowseSupportFragment {
         } else {
             pageFooterAdapter.replace(0, action);
         }
+        updatePagedState(state, count);
+    }
+
+    private void updatePagedState(MainPagingState state, int count) {
+        // The footer and its paging actions stay intact; the panel only explains a window with no cards.
+        BrowseStatus.Page presentation = BrowseStatus.page(state, count,
+                state == photoPaging && photoScan.isPaused());
+        if (presentation == BrowseStatus.Page.CONTENT) {
+            boolean restoreFocus = getActivity() instanceof MainActivity
+                    && ((MainActivity) getActivity()).hasBrowseStateFocus();
+            clearState();
+            if (restoreFocus) focusBrowseContent();
+            return;
+        }
+        if (presentation == BrowseStatus.Page.LOADING) {
+            showLoadingOverlay("正在加载" + (pagedTitle == null ? "内容" : pagedTitle));
+            return;
+        }
+        Runnable retry = () -> {
+            if (state == photoPaging) loadPhotoPage(true);
+            else if (state == albumPaging) loadAlbumPage();
+            else if (state == sharedAlbumPaging) loadSharedAlbumPage();
+        };
+        switch (presentation) {
+            case ERROR:
+                String reason = state == photoPaging ? photoFailureMessage : albumFailureMessage;
+                String heading = BrowseStatus.httpFailure(state == photoPaging
+                        ? photoFailureHttpStatus : albumFailureHttpStatus).title;
+                showState(new BrowseStatus(heading, reason == null
+                        ? "未能取得有效结果，请检查网络或 NAS 服务后重试。" : reason), "重试", retry);
+                break;
+            case INCOMPLETE:
+                showState(new BrowseStatus("结果可能不完整", "服务端返回了重复或矛盾的分页结果，或已到达查询范围上限。请返回并缩小范围。"),
+                        "浏览其他内容", this::openBrowseMenu);
+                break;
+            case CONTINUE:
+                showState(new BrowseStatus("尚未找到匹配内容", "当前扫描尚未结束，可以继续查找；此状态不代表没有内容。"),
+                        "继续查找", retry);
+                break;
+            case EMPTY:
+                BrowseStatus empty;
+                if (state.getOffset() > 0) {
+                    empty = new BrowseStatus("本批没有匹配内容", "已扫描到当前范围末尾，本批没有可显示的内容。可返回或切换其他浏览方式。");
+                } else if (albumDirectory || sharedAlbumDirectory || "media_type".equals(photoMode)) {
+                    empty = BrowseStatus.empty(rootBrowseMode);
+                } else {
+                    empty = new BrowseStatus("当前范围暂无照片或视频", "NAS 返回的此相册、日期或人物范围内没有内容。可按返回键查看其他内容。");
+                }
+                showState(empty, "浏览其他内容", this::openBrowseMenu);
+                break;
+            default: break;
+        }
+        focusBrowseContent();
     }
 
     public void loadPhotosByGeo(MediaItem placeItem) {
@@ -1867,7 +1942,7 @@ public class MainFragment extends BrowseSupportFragment {
                         positionHandler.post(() -> {
                             if (!requests.complete(call, generation)) return;
                             hideLoadingOverlay();
-                            showGeoFailure("地点请求失败（HTTP " + status + "），按确定重试");
+                            showGeoFailure(BrowseStatus.httpFailure(status).message);
                         });
                         return;
                     }
@@ -1899,11 +1974,9 @@ public class MainFragment extends BrowseSupportFragment {
     private void showGeoFailure(String message) {
         mRowsAdapter.clear();
         currentMediaList = new ArrayList<>();
-        ArrayObjectAdapter adapter = new ArrayObjectAdapter(mCardPresenter);
-        MediaItem retry = new MediaItem("__geo_retry", "确定：重试地点查询", "geo_retry", null, null);
-        retry.setDateStr(message);
-        adapter.add(retry);
-        mRowsAdapter.add(new ListRow(new HeaderItem("地点加载失败"), adapter));
+        final MediaItem retryItem = geoRetryItem;
+        showState(new BrowseStatus("地点加载失败", message), "重试", () -> loadPhotosByGeo(retryItem));
+        focusBrowseContent();
     }
 
     private void showLoadingOverlay(String message) {
@@ -1989,7 +2062,12 @@ public class MainFragment extends BrowseSupportFragment {
 
             mRowsAdapter.add(new ListRow(header, rowAdapter));
         }
-        addBoundaryNotice(geoBoundaryMessage);
+        if (photos.isEmpty()) {
+            showState(new BrowseStatus("本次未返回地点照片", geoBoundaryMessage), "返回地点", this::onBackPressed);
+            focusBrowseContent();
+        } else {
+            addBoundaryNotice(geoBoundaryMessage);
+        }
     }
 
     public void loadPeople() {
@@ -2012,7 +2090,7 @@ public class MainFragment extends BrowseSupportFragment {
                     displayPeople(result.data.list);
                     rootLoadSucceeded();
                 } else {
-                    rootLoadFailed();
+                    rootLoadFailed(BrowseStatus.httpFailure(response.code()));
                 }
             }
             @Override public void onFailure(Call<FnHttpApi.PersonListResponse> call, Throwable error) {
@@ -2082,21 +2160,30 @@ public class MainFragment extends BrowseSupportFragment {
             public void onResponse(Call<FnHttpApi.PersonTimelineResponse> call,
                                    Response<FnHttpApi.PersonTimelineResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.PersonTimelineResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayPersonTimeline(result.data.list);
-                    } else {
-                        showEmptyState(personName + " 暂无照片");
-                    }
+                FnHttpApi.PersonTimelineResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayPersonTimeline(result.data.list);
+                } else {
+                    showPersonFailure(BrowseStatus.httpFailure(response.code()), personId, personName);
                 }
             }
 
             @Override
             public void onFailure(Call<FnHttpApi.PersonTimelineResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+                hideLoadingOverlay();
+                showPersonFailure(new BrowseStatus("加载失败", isMetadataLimit(t)
+                        ? "人物响应超过安全大小，请返回按其他方式浏览。"
+                        : "未能取得人物照片，请检查网络和 NAS 服务后重试。"), personId, personName);
             }
         });
+    }
+
+    private void showPersonFailure(BrowseStatus status, int personId, String personName) {
+        isPhotoListView = false;
+        mRowsAdapter.clear();
+        showState(status, "重试", () -> loadPersonTimeline(personId, personName));
+        focusBrowseContent();
     }
 
     private void displayPersonTimeline(List<FnHttpApi.PersonTimelineItem> items) {
@@ -2110,6 +2197,13 @@ public class MainFragment extends BrowseSupportFragment {
         personDateItems.clear();
         personTimelineItemsList.clear();
         personLoadedIdx.clear();
+        if (items.isEmpty()) {
+            showState(new BrowseStatus("此人物暂无照片", "NAS 尚未返回此人物的照片，可返回查看其他人物。"),
+                    "返回人物", this::onBackPressed);
+            focusBrowseContent();
+            return;
+        }
+        clearState();
 
         String currentYearMonth = "";
         ArrayObjectAdapter currentRowAdapter = null;

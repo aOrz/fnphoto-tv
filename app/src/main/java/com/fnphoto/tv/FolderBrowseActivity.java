@@ -13,6 +13,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ImageView;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -50,6 +51,7 @@ public class FolderBrowseActivity extends FragmentActivity {
     private RecyclerView rvPhotos;
     private LinearLayout layoutContent;
     private TextView tvLoading;
+    private TvStateView screenState;
 
     private FnHttpApi api;
     private String token;
@@ -71,6 +73,8 @@ public class FolderBrowseActivity extends FragmentActivity {
     private boolean foldersLoading;
     private boolean foldersFailed;
     private boolean foldersTruncated;
+    private GridScreenState.Failure folderFailure = GridScreenState.Failure.REQUEST;
+    private GridScreenState.Failure mediaFailure = GridScreenState.Failure.REQUEST;
     private Object dataGeneration = new Object();
     private boolean destroyed;
     private MediaListHolder.PageCallback detailCallback;
@@ -138,23 +142,23 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvLoading = new TextView(this);
         tvLoading.setText("加载中...");
         tvLoading.setTextColor(Color.parseColor("#A8AFBF"));
-        tvLoading.setTextSize(14);
+        tvLoading.setTextSize(18);
         tvLoading.setBackgroundResource(R.drawable.bg_menu_item);
-        tvLoading.setPadding(dp(64), dp(14), dp(64), dp(6));
-        tvLoading.setOnClickListener(v -> {
-            if (foldersFailed) loadSubFolders();
-            if (pages.isWindowFull()) startNextWindow();
-            else loadMediaFiles(true);
-        });
+        tvLoading.setMinHeight(dp(52));
+        tvLoading.setPadding(dp(64), dp(12), dp(64), dp(12));
+        tvLoading.setOnClickListener(v -> retryFolderContent());
         tvLoading.setFocusable(false);
         tvLoading.setClickable(false);
         rootLayout.addView(tvLoading);
 
         // 内容区域
+        FrameLayout content = new FrameLayout(this);
+        rootLayout.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         layoutContent = new LinearLayout(this);
         layoutContent.setOrientation(LinearLayout.VERTICAL);
-        layoutContent.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        layoutContent.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // 文件夹列表区域
         TextView tvFoldersTitle = new TextView(this);
@@ -216,7 +220,10 @@ public class FolderBrowseActivity extends FragmentActivity {
         });
         layoutContent.addView(rvPhotos);
 
-        rootLayout.addView(layoutContent);
+        content.addView(layoutContent);
+        screenState = new TvStateView(this);
+        content.addView(screenState, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(rootLayout);
         // Results arrive asynchronously. Wait for real children, and never move
         // an existing card/retry focus when another page is appended.
@@ -237,7 +244,9 @@ public class FolderBrowseActivity extends FragmentActivity {
         if (focusFirstChild(rvFolders) || focusFirstChild(rvPhotos)) return;
         if (tvLoading != null && tvLoading.isShown() && tvLoading.isFocusable()) {
             tvLoading.requestFocus();
+            return;
         }
+        if (screenState != null) screenState.focusAction();
     }
 
     private boolean focusFirstChild(RecyclerView grid) {
@@ -281,6 +290,7 @@ public class FolderBrowseActivity extends FragmentActivity {
         if (api == null || destroyed || foldersLoading) return;
         foldersLoading = true;
         foldersFailed = false;
+        folderFailure = GridScreenState.Failure.REQUEST;
         updateLoadingStatus();
         String params = "desc=false&orderBy=2&folderPath=" + currentFolderPath;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/folder_view/getFolderList", "GET", params);
@@ -310,6 +320,7 @@ public class FolderBrowseActivity extends FragmentActivity {
                     folderAdapter.notifyDataSetChanged();
                 } else {
                     foldersFailed = true;
+                    folderFailure = GridScreenState.Failure.fromHttpStatus(response.code());
                 }
                 updateLoadingStatus();
             }
@@ -317,6 +328,7 @@ public class FolderBrowseActivity extends FragmentActivity {
                 if (destroyed || call != folderCall || call.isCanceled()) return;
                 foldersLoading = false;
                 foldersFailed = true;
+                folderFailure = GridScreenState.Failure.REQUEST;
                 updateLoadingStatus();
             }
         });
@@ -326,6 +338,7 @@ public class FolderBrowseActivity extends FragmentActivity {
         if (api == null || destroyed) return;
         final GridPageState.Request page = pages.begin(retry);
         if (page == null) return;
+        mediaFailure = GridScreenState.Failure.REQUEST;
         updateLoadingStatus();
         String params = "folderPath=" + currentFolderPath + "&desc=false&orderBy=2&limit="
                 + page.limit + "&offset=" + page.offset;
@@ -338,6 +351,7 @@ public class FolderBrowseActivity extends FragmentActivity {
                 FnHttpApi.FolderFileListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || result.data.list == null) {
+                    mediaFailure = GridScreenState.Failure.fromHttpStatus(response.code());
                     pages.fail(page);
                     updateLoadingStatus();
                     return;
@@ -372,7 +386,10 @@ public class FolderBrowseActivity extends FragmentActivity {
             }
             @Override public void onFailure(Call<FnHttpApi.FolderFileListResponse> call, Throwable t) {
                 if (destroyed || call.isCanceled()) return;
-                if (pages.fail(page)) updateLoadingStatus();
+                if (pages.fail(page)) {
+                    mediaFailure = GridScreenState.Failure.REQUEST;
+                    updateLoadingStatus();
+                }
             }
         });
     }
@@ -388,6 +405,12 @@ public class FolderBrowseActivity extends FragmentActivity {
         loadMediaFiles(false);
     }
 
+    private void retryFolderContent() {
+        if (foldersFailed) loadSubFolders();
+        if (pages.isWindowFull()) startNextWindow();
+        else loadMediaFiles(true);
+    }
+
     private void updateLoadingStatus() {
         if (detailCallback != null && !pages.isLoading()) {
             MediaListHolder.PageCallback callback = detailCallback;
@@ -396,12 +419,15 @@ public class FolderBrowseActivity extends FragmentActivity {
             else callback.onLoaded(toMediaItems(), pages.hasMore());
         }
         boolean error = foldersFailed || pages.hasError();
+        boolean hasContent = !folderList.isEmpty() || !photoList.isEmpty();
+        tvLoading.setVisibility(hasContent ? View.VISIBLE : View.GONE);
+        layoutContent.setVisibility(hasContent ? View.VISIBLE : View.GONE);
         tvLoading.setFocusable(error || pages.isWindowFull());
         tvLoading.setClickable(error || pages.isWindowFull());
         if (pages.isInvalidPage()) {
             tvLoading.setText("服务器分页响应超限或无效，未跳过记录；按确定重试或返回缩小范围");
         } else if (error) {
-            tvLoading.setText("部分内容加载失败，按确定重试（已加载 " + photoList.size() + " 项）");
+            tvLoading.setText(failureHeading() + "，按确定重试（保留已加载内容）");
         } else if (pages.isWindowFull()) {
             tvLoading.setText("本批已扫描 " + pages.getWindowRows() + " 条、显示 " + photoList.size()
                     + " 项；按确定查看下一批（替换当前列表）");
@@ -412,11 +438,67 @@ public class FolderBrowseActivity extends FragmentActivity {
         } else if (foldersLoading || pages.isLoading()) {
             tvLoading.setText(photoList.isEmpty() ? "加载中..." : "正在加载更多...");
         } else {
-            tvLoading.setText(folderList.isEmpty() && photoList.isEmpty() ? "该文件夹为空"
-                    : "已加载 " + photoList.size() + " 项" + (pages.hasMore() ? "，下移加载更多" : ""));
+            tvLoading.setText(folderList.size() + " 个子文件夹 · " + photoList.size()
+                    + " 项照片和视频" + (pages.hasMore() ? "，下移加载更多" : ""));
         }
         if (foldersTruncated) tvLoading.append("；子文件夹仅显示前 " + MetadataLimits.MAX_ITEMS
                 + " 项，接口无已验证分页，请返回上级缩小范围");
+        if (hasContent) screenState.setVisibility(View.GONE);
+        else showFolderState(GridScreenState.folder(foldersLoading, foldersFailed, folderList.size(),
+                photoList.size(), pages, currentFailure()));
+    }
+
+    private GridScreenState.Failure currentFailure() {
+        if ((foldersFailed && folderFailure == GridScreenState.Failure.AUTHENTICATION)
+                || (pages.hasError() && mediaFailure == GridScreenState.Failure.AUTHENTICATION)) {
+            return GridScreenState.Failure.AUTHENTICATION;
+        }
+        if ((foldersFailed && folderFailure == GridScreenState.Failure.PERMISSION)
+                || (pages.hasError() && mediaFailure == GridScreenState.Failure.PERMISSION)) {
+            return GridScreenState.Failure.PERMISSION;
+        }
+        return GridScreenState.Failure.REQUEST;
+    }
+
+    private String failureHeading() {
+        if (currentFailure() == GridScreenState.Failure.AUTHENTICATION) return "登录已失效";
+        if (currentFailure() == GridScreenState.Failure.PERMISSION) return "没有访问权限";
+        return "部分内容加载失败";
+    }
+
+    private void showFolderState(GridScreenState.Kind state) {
+        switch (state) {
+            case LOADING:
+                screenState.bind("正在加载文件夹", "正在读取子文件夹、照片和视频，请稍候。", null, null);
+                screenState.setLoading(true);
+                break;
+            case EMPTY:
+                screenState.bind("文件夹为空", "此文件夹没有子文件夹、照片或视频。可返回上级继续浏览。",
+                        "返回上级", this::onBackPressed);
+                break;
+            case EMPTY_WINDOW:
+                screenState.bind("本批没有更多内容", "此前已有文件夹内容，当前批次没有更多照片或视频。可返回上级继续浏览。",
+                        "返回上级", this::onBackPressed);
+                break;
+            case AUTHENTICATION:
+                screenState.bind("登录已失效", "当前登录无法继续访问。可重试；若仍失败，请返回并重新登录。",
+                        "重试", this::retryFolderContent);
+                break;
+            case PERMISSION:
+                screenState.bind("没有访问权限", "服务器拒绝访问此文件夹。请检查当前账号的文件夹权限后重试。",
+                        "重试", this::retryFolderContent);
+                break;
+            case BOUNDARY:
+                screenState.bind("文件夹内容不完整", pages.boundaryMessage(),
+                        pages.isWindowFull() ? "查看下一批" : "返回上级",
+                        pages.isWindowFull() ? this::startNextWindow : this::onBackPressed);
+                break;
+            default:
+                screenState.bind("文件夹加载失败", pages.isInvalidPage()
+                                ? "服务器返回的分页数据无效，未跳过记录。请重试，或返回上级缩小范围。"
+                                : "未能取得文件夹内容。请检查网络和 NAS 服务后重试。",
+                        "重新加载", this::retryFolderContent);
+        }
     }
 
     @Override protected void onDestroy() {
