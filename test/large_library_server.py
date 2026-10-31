@@ -60,14 +60,16 @@ def gallery_boundary_response(request, gallery_page_cap=None, omit_gallery_pagin
 
 
 def fault_middleware(fail_once_offset=None, fail_first_location=False, gallery_delay_ms=0,
-                     gallery_page_cap=None, omit_gallery_paging=False):
+                     gallery_page_cap=None, omit_gallery_paging=False, *,
+                     album_delay_ms=0, fail_once_album_offset=None, thumbnail_delay_ms=0):
     """One-shot failures and cancellation delays apply only to this synthetic process."""
     failed_gallery = False
+    failed_album = False
     failed_location = False
 
     @web.middleware
     async def faults(request, handler):
-        nonlocal failed_gallery, failed_location
+        nonlocal failed_gallery, failed_album, failed_location
         if request.path == "/p/api/v1/gallery/getList":
             if gallery_delay_ms:
                 await asyncio.sleep(gallery_delay_ms / 1000)
@@ -76,6 +78,18 @@ def fault_middleware(fail_once_offset=None, fail_first_location=False, gallery_d
                 raise web.HTTPServiceUnavailable(text="Intentional one-shot synthetic page failure")
             if gallery_page_cap is not None or omit_gallery_paging:
                 return gallery_boundary_response(request, gallery_page_cap, omit_gallery_paging)
+        if request.path == "/p/api/v1/album/photos":
+            if album_delay_ms:
+                await asyncio.sleep(album_delay_ms / 1000)
+            if (fail_once_album_offset is not None and not failed_album
+                    and request.query.get("offset", "0") == str(fail_once_album_offset)):
+                failed_album = True
+                raise web.HTTPServiceUnavailable(text="Intentional one-shot synthetic album page failure")
+        if thumbnail_delay_ms and request.path.startswith("/p/api/v1/stream/p/t/"):
+            # Main-list mUrl uses /o/...?...size=m; no-size /o/ remains an original.
+            variant = request.path.rsplit("/", 2)[-2]
+            if variant in ("s", "m") or (variant == "o" and request.query.get("size") in ("m", "s", "xs", "xxs")):
+                await asyncio.sleep(thumbnail_delay_ms / 1000)
         if request.path == "/p/api/v1/search/results" and fail_first_location and not failed_location:
             failed_location = True
             raise web.HTTPServiceUnavailable(text="Intentional one-shot synthetic location failure")
@@ -91,6 +105,9 @@ def main(argv=None):
     parser.add_argument("--fail-once-offset", type=int, help="First gallery request at this offset fails with HTTP 503")
     parser.add_argument("--fail-first-location", action="store_true", help="First location request fails with HTTP 503")
     parser.add_argument("--gallery-delay-ms", type=int, default=0, help="Synthetic gallery delay for cancellation tests, 0..10000")
+    parser.add_argument("--album-delay-ms", type=int, default=0, help="Synthetic album/photos delay, independent of gallery and thumbnails, 0..10000")
+    parser.add_argument("--fail-once-album-offset", type=int, help="First album/photos request at this offset fails with HTTP 503")
+    parser.add_argument("--thumbnail-delay-ms", type=int, default=0, help="Synthetic thumbnail response delay (/s/, /m/, or /o/?size=...), independent of metadata, 0..10000")
     parser.add_argument("--gallery-page-cap", type=int, help="Synthetic server returns at most this many gallery rows despite requested limit")
     parser.add_argument("--omit-gallery-paging", action="store_true", help="Omit gallery hasNext/count/total to test unknown end-of-list")
     parser.add_argument("--port", type=int, default=5666)
@@ -98,7 +115,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.count <= 100000 or not 1 <= args.port <= 65535:
         parser.error("count must be 1..100000 and port must be 1..65535")
-    if (args.fail_once_offset is not None and args.fail_once_offset < 0) or not 0 <= args.gallery_delay_ms <= 10000:
+    if (any(value is not None and value < 0 for value in (args.fail_once_offset, args.fail_once_album_offset))
+            or any(not 0 <= value <= 10000 for value in (args.gallery_delay_ms, args.album_delay_ms, args.thumbnail_delay_ms))):
         parser.error("failure offset must be non-negative and delay must be 0..10000 ms")
     if args.gallery_page_cap is not None and not 1 <= args.gallery_page_cap <= 100000:
         parser.error("gallery page cap must be 1..100000")
@@ -109,7 +127,9 @@ def main(argv=None):
         print("WARNING: mock has no access control; non-loopback is only for an isolated test network.")
     app = mock.build_app()
     app.middlewares.append(fault_middleware(args.fail_once_offset, args.fail_first_location,
-        args.gallery_delay_ms, args.gallery_page_cap, args.omit_gallery_paging))
+        args.gallery_delay_ms, args.gallery_page_cap, args.omit_gallery_paging,
+        album_delay_ms=args.album_delay_ms, fail_once_album_offset=args.fail_once_album_offset,
+        thumbnail_delay_ms=args.thumbnail_delay_ms))
     app.on_response_prepare.append(qa_server.request_trace(args.trace_file))
     web.run_app(app, host=args.host, port=args.port, access_log=None)
 

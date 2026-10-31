@@ -10,6 +10,16 @@ documented in [Large-library safety boundaries](large-library-boundaries.md).
   request the next page near the selected item. Album directories use 60-item
   pages; folder/search grids use 100-item pages. A footer/status exposes errors
   and explicit retry instead of silently presenting a partial list as complete.
+- On paged photo walls, focusing the ordinary continuation footer also requests
+  the next page. Demand observed during a pending request is checked again after
+  the page is appended. If focus is still on that footer, it transfers to the
+  first newly available photo; callbacks do not take focus from a drawer,
+  another photo or another screen. Image downloads do not gate metadata paging.
+  The footer keeps its original content boundary as an anchor, so appending rows
+  cannot make it chase the moving end indefinitely. Each automatic demand is
+  limited to five raw pages, including sparse scans and short-page catch-up;
+  focus handoff and footer rebinding cannot renew this budget. Retry, exhausted
+  scan budgets and the retained-window boundary remain explicit actions.
 - Paging is single-flight. Offsets count raw server rows, while displayed items
   are deduplicated by media ID. An empty or all-duplicate page stops pagination.
   A nullable `hasNext` is authoritative when present; otherwise a later empty

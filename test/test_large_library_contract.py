@@ -1,9 +1,13 @@
 """Offline synthetic-contract tests, not evidence about a real NAS version."""
 import asyncio
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 import test_server as server
 import large_library_server as fixture
 
@@ -119,6 +123,12 @@ class LargeLibraryContracts(unittest.TestCase):
 
 
 class FaultScenarioTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        import qa_server
+        qa_server.configure_fixture("large")
+        server.GEO_RESPONSE_LIMIT = None
+        server.GEO_REPORT_PAGING = True
+
     async def test_gallery_failure_recovers_at_same_offset(self):
         from types import SimpleNamespace
         middleware = fixture.fault_middleware(fail_once_offset=35)
@@ -142,6 +152,118 @@ class FaultScenarioTests(unittest.IsolatedAsyncioTestCase):
         async def success(request): return "ok"
         with self.assertRaises(web.HTTPServiceUnavailable): await middleware(request, success)
         self.assertEqual(await middleware(request, success), "ok")
+
+    async def test_album_and_gallery_failures_are_independent_and_retry_same_offset(self):
+        middleware = fixture.fault_middleware(fail_once_offset=35, fail_once_album_offset=35)
+        async def success(request): return "ok"
+        for path in ("/p/api/v1/album/photos", "/p/api/v1/gallery/getList"):
+            self.assertEqual(await middleware(SimpleNamespace(path=path, query={"offset": "0"}), success), "ok")
+            request = SimpleNamespace(path=path, query={"offset": "35"})
+            with self.assertRaises(web.HTTPServiceUnavailable): await middleware(request, success)
+            self.assertEqual(await middleware(request, success), "ok")
+
+    async def test_gallery_only_fault_does_not_apply_to_album(self):
+        middleware = fixture.fault_middleware(fail_once_offset=35, gallery_delay_ms=3000)
+        async def success(request): return "ok"
+        with patch.object(fixture.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+            album = SimpleNamespace(path="/p/api/v1/album/photos", query={"offset": "35"})
+            self.assertEqual(await middleware(album, success), "ok")
+            sleep.assert_not_awaited()
+            gallery = SimpleNamespace(path="/p/api/v1/gallery/getList", query={"offset": "35"})
+            with self.assertRaises(web.HTTPServiceUnavailable): await middleware(gallery, success)
+            sleep.assert_awaited_once_with(3)
+
+    async def test_thumbnail_and_metadata_delays_are_independent(self):
+        middleware = fixture.fault_middleware(gallery_delay_ms=3000, album_delay_ms=1000, thumbnail_delay_ms=9000)
+        async def success(request): return "ok"
+        cases = [("/p/api/v1/gallery/getList", {}, 3), ("/p/api/v1/album/photos", {}, 1),
+                 ("/p/api/v1/stream/p/t/1/s/boundary", {}, 9),
+                 ("/p/api/v1/stream/p/t/1/m/boundary", {}, 9),
+                 ("/p/api/v1/stream/p/t/1/o/boundary", {}, None),
+                 ("/p/api/v1/stream/p/t/1/o/boundary", {"size": "original"}, None),
+                 ("/p/api/v1/stream/v/1", {}, None), ("/p/api/v1/stream/face/1", {}, None),
+                 ("/p/api/v1/album/list", {}, None)]
+        cases += [("/p/api/v1/stream/p/t/1/o/boundary", {"size": size}, 9) for size in ("m", "s", "xs", "xxs")]
+        for path, query, delay in cases:
+            with self.subTest(path=path, query=query), patch.object(fixture.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+                self.assertEqual(await middleware(SimpleNamespace(path=path, query=query), success), "ok")
+                if delay is None: sleep.assert_not_awaited()
+                else: sleep.assert_awaited_once_with(delay)
+
+    async def test_zero_delays_do_not_schedule_sleep(self):
+        middleware = fixture.fault_middleware()
+        async def success(request): return "ok"
+        with patch.object(fixture.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+            for path in ("/p/api/v1/gallery/getList", "/p/api/v1/album/photos", "/p/api/v1/stream/p/t/1/s/boundary"):
+                self.assertEqual(await middleware(SimpleNamespace(path=path, query={}), success), "ok")
+            sleep.assert_not_awaited()
+
+    async def test_gallery_cap_and_unknown_paging_survive_delayed_failure_retry(self):
+        fixture.configure_fixture("large-place", 20)
+        middleware = fixture.fault_middleware(fail_once_offset=7, gallery_delay_ms=3000,
+                                              gallery_page_cap=7, omit_gallery_paging=True, thumbnail_delay_ms=9000)
+        request = SimpleNamespace(path="/p/api/v1/gallery/getList", query={"offset": "7", "limit": "35"})
+        async def unexpected(request): self.fail("capped gallery response should be handled by middleware")
+        with patch.object(fixture.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+            with self.assertRaises(web.HTTPServiceUnavailable): await middleware(request, unexpected)
+            data = json.loads((await middleware(request, unexpected)).text)["data"]
+            self.assertEqual(set(data), {"list"})
+            self.assertEqual([p["id"] for p in data["list"]], list(range(13, 6, -1)))
+            self.assertEqual(sleep.await_count, 2)
+            self.assertTrue(all(call.args == (3,) for call in sleep.await_args_list))
+
+    async def test_album_metadata_completes_while_thumbnail_http_response_is_pending(self):
+        fixture.configure_fixture("large-place", 70)
+        thumbnail_path = "/p/api/v1/stream/p/t/1/o/boundary"
+        entered = asyncio.Event()
+        @web.middleware
+        async def observe(request, handler):
+            if request.path == thumbnail_path: entered.set()
+            return await handler(request)
+        app = server.build_app()
+        app.middlewares.extend([observe, fixture.fault_middleware(album_delay_ms=20, thumbnail_delay_ms=400)])
+        async with TestClient(TestServer(app)) as client:
+            image = asyncio.create_task(client.get(thumbnail_path, params={"size": "m"}))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                metadata = await client.get("/p/api/v1/album/photos", params={
+                    "album_id": server.ALBUMS[0]["albumId"], "offset": 35, "limit": 35})
+                self.assertEqual(metadata.status, 200)
+                self.assertEqual(len((await metadata.json())["data"]["list"]), 35)
+                self.assertFalse(image.done(), "metadata must not wait for thumbnail delay")
+                response = await asyncio.wait_for(image, 2)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.content_type, "image/jpeg")
+                self.assertTrue((await response.read()).startswith(b"\xff\xd8"))
+            finally:
+                if not image.done(): image.cancel()
+                await asyncio.gather(image, return_exceptions=True)
+
+
+class FaultArgumentTests(unittest.TestCase):
+    def test_delay_limits_and_failure_offsets_are_validated_before_startup(self):
+        invalid = [(name, value) for name in ("--thumbnail-delay-ms", "--album-delay-ms", "--gallery-delay-ms")
+                   for value in ("-1", "10001")]
+        invalid += [("--fail-once-offset", "-1"), ("--fail-once-album-offset", "-1")]
+        for name, value in invalid:
+            with self.subTest(name=name, value=value), patch.object(fixture, "configure_fixture") as configure, \
+                    patch.object(fixture.web, "run_app") as run, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error: fixture.main([name, value])
+                self.assertEqual(error.exception.code, 2)
+                configure.assert_not_called()
+                run.assert_not_called()
+
+    def test_zero_and_maximum_delays_are_accepted_and_forwarded(self):
+        for delay in (0, 10000):
+            with self.subTest(delay=delay), patch.object(fixture, "configure_fixture"), \
+                    patch.object(fixture, "fault_middleware", wraps=fixture.fault_middleware) as middleware, \
+                    patch.object(fixture.web, "run_app") as run, redirect_stdout(io.StringIO()):
+                fixture.main(["--gallery-delay-ms", str(delay), "--album-delay-ms", str(delay),
+                              "--thumbnail-delay-ms", str(delay), "--fail-once-album-offset", "0"])
+                self.assertEqual(middleware.call_args.args[2], delay)
+                self.assertEqual(middleware.call_args.kwargs, {
+                    "album_delay_ms": delay, "thumbnail_delay_ms": delay, "fail_once_album_offset": 0})
+                run.assert_called_once()
 
 
 if __name__ == "__main__":

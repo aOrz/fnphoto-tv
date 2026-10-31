@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -282,10 +283,13 @@ public class MainActivity extends FragmentActivity {
 
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && drawerLayout != null && getCurrentFocus() == null) {
+        if (hasFocus && drawerLayout != null) {
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
-            if (fragment != null) fragment.focusBrowseContent();
+            if (fragment != null) {
+                if (getCurrentFocus() == null) fragment.focusBrowseContent();
+                fragment.schedulePhotoDemandCheck();
+            }
         }
     }
 
@@ -396,6 +400,22 @@ public class MainActivity extends FragmentActivity {
         intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(intent);
         finish();
+    }
+
+    private void cancelPendingPhotoFocusHandoff() {
+        androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
+                .findFragmentById(R.id.main_content_container);
+        if (fragment instanceof MainFragment) ((MainFragment) fragment).cancelPhotoFocusHandoff();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) cancelPendingPhotoFocusHandoff();
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) cancelPendingPhotoFocusHandoff();
+        return super.dispatchTouchEvent(event);
     }
 
     @Override

@@ -7,6 +7,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.View;
+import android.view.ViewParent;
 
 import androidx.leanback.app.BrowseSupportFragment;
 import androidx.leanback.app.RowsSupportFragment;
@@ -62,6 +64,11 @@ public class MainFragment extends BrowseSupportFragment {
     private int previewScreen; // 0: inactive, 1: timeline, 2: person timeline
     private MainPagingState photoPaging;
     private final SparseScanBudget photoScan = new SparseScanBudget(MetadataLimits.MAX_SCAN_PAGES);
+    private final PhotoPageDemand photoPageDemand = new PhotoPageDemand(MetadataLimits.MAX_SCAN_PAGES);
+    private boolean photoDemandCheckPosted;
+    private boolean photoFocusHandoffPending;
+    private long photoFocusHandoffGeneration;
+    private String photoFocusHandoffTargetId;
     private boolean timelineLimited;
     private boolean peopleLimited;
     private boolean personTimelineLimited;
@@ -72,7 +79,6 @@ public class MainFragment extends BrowseSupportFragment {
     private String albumFailureMessage;
     private MainPagingState albumPaging;
     private boolean applyingPage;
-    private int lastFilteredAutoIndex;
     private boolean albumDirectory;
     private MainPagingState sharedAlbumPaging;
     private boolean sharedAlbumDirectory;
@@ -233,11 +239,13 @@ public class MainFragment extends BrowseSupportFragment {
             RowsSupportFragment rows = getRowsSupportFragment();
             if (!hasCards || rows == null || rows.getVerticalGridView() == null
                     || !rows.getVerticalGridView().requestFocus()) activity.focusBrowseMenuButton();
+            schedulePhotoDemandCheck();
         });
     }
 
     @Override public void onResume() {
         super.onResume();
+        schedulePhotoDemandCheck();
         if (getActivity() == null) return;
         long revision = getActivity().getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE)
                 .getLong("collect_revision", 0L);
@@ -288,8 +296,12 @@ public class MainFragment extends BrowseSupportFragment {
         if (sharedAlbumPaging != null) sharedAlbumPaging.cancel();
         photoPaging = null;
         photoScan.reset();
+        photoPageDemand.reset();
+        photoDemandCheckPosted = false;
+        photoFocusHandoffPending = false;
+        photoFocusHandoffGeneration++;
+        photoFocusHandoffTargetId = null;
         applyingPage = false;
-        lastFilteredAutoIndex = 0;
         geoRetryItem = null;
         geoBoundaryMessage = null;
         photoFailureMessage = null;
@@ -390,6 +402,22 @@ public class MainFragment extends BrowseSupportFragment {
         PhotoWallLayout next = calculateWallLayout(width);
         if (next.columns == wallLayout.columns && next.cardWidthPx == wallLayout.cardWidthPx) return;
         boolean columnsChanged = next.columns != wallLayout.columns;
+        View focusedCard = focusedPhotoWallCard();
+        final String selectionId = photoFocusHandoffPending ? photoFocusHandoffTargetId
+                : focusedCard != null ? (String) focusedCard.getTag(R.id.media_item_id)
+                : selectedWallItem == null ? null : selectedWallItem.getId();
+        final boolean preservePhotoFocus = photoPaging != null && selectionId != null
+                && (focusedCard != null || photoFocusHandoffPending);
+        final long generation = requests.generation();
+        final long handoff;
+        if (preservePhotoFocus) {
+            // Rebinding/reflow can discard the old row task. Replace it with one task owned by
+            // this layout, keeping the intended item and the same automatic paging budget.
+            photoFocusHandoffPending = true;
+            photoFocusHandoffTargetId = selectionId;
+            handoff = ++photoFocusHandoffGeneration;
+            reflowingWall = true;
+        } else handoff = photoFocusHandoffGeneration;
         wallLayout = next;
         mCardPresenter.setWallLayout(next);
         if (!columnsChanged) {
@@ -397,12 +425,12 @@ public class MainFragment extends BrowseSupportFragment {
                 ArrayObjectAdapter cards = (ArrayObjectAdapter) ((ListRow) mRowsAdapter.get(i)).getAdapter();
                 cards.notifyItemRangeChanged(0, cards.size());
             }
+            if (preservePhotoFocus) restorePhotoFocusAfterLayout(selectionId, generation, handoff);
             return;
         }
 
         // Keep the same MediaItems, request generations, offsets and preview cache. Rebuilding
         // a screen via displayTimeline/loadPhotos would restart requests and lose selection.
-        MediaItem selection = selectedWallItem;
         Object pagedTail = pagedLastRow == null || pagedLastRow.size() == 0 ? null
                 : pagedLastRow.get(pagedLastRow.size() - 1);
         List<PhotoWallRows.Row<MediaItem, HeaderItem>> source = new ArrayList<>();
@@ -424,7 +452,7 @@ public class MainFragment extends BrowseSupportFragment {
                 MediaItem item = row.items.get(column);
                 if ("date".equals(item.getType()) || "person_date".equals(item.getType())) previewRows.put(item, cards);
                 if (item == pagedTail) pagedLastRow = cards;
-                if (item == selection) {
+                if (selectionId != null && selectionId.equals(item.getId())) {
                     selectedRow = replacement.size();
                     selectedColumn = column;
                 }
@@ -434,12 +462,16 @@ public class MainFragment extends BrowseSupportFragment {
         reflowingWall = true;
         mRowsAdapter.clear();
         mRowsAdapter.addAll(0, replacement);
+        if (preservePhotoFocus) {
+            restorePhotoFocusAfterLayout(selectionId, generation, handoff);
+            return;
+        }
         final int row = selectedRow, column = selectedColumn;
-        final long generation = requests.generation();
         positionHandler.post(() -> {
             if (!requests.isCurrent(generation)) return;
             restoreCardSelection(row, column);
             reflowingWall = false;
+            schedulePhotoDemandCheck();
         });
     }
 
@@ -500,14 +532,11 @@ public class MainFragment extends BrowseSupportFragment {
                     if (reflowingWall) return;
                     MediaItem mi = (MediaItem) item;
                     selectedWallItem = mi;
-                    if (photoPaging != null && ("photo".equals(mi.getType()) || "video".equals(mi.getType()))) {
-                        Integer index = photoPositions.get(mi.getId());
-                        if (index != null && index >= currentMediaList.size() - PREFETCH_DISTANCE
-                                && !photoPaging.hasFailed() && !applyingPage
-                                && (!isFilteredPhotoMode() || index > lastFilteredAutoIndex)) {
-                            if (isFilteredPhotoMode()) lastFilteredAutoIndex = index;
-                            loadPhotoPage();
-                        }
+                    if (photoPaging != null && ("photo".equals(mi.getType())
+                            || "video".equals(mi.getType()) || "page_action".equals(mi.getType()))) {
+                        // Selection can precede focus/layout, or arrive while a page is being applied.
+                        // Recheck actual focus after layout instead of consuming an in-flight demand.
+                        schedulePhotoDemandCheck();
                     } else if (sharedAlbumDirectory && "shared_album".equals(mi.getType())) {
                         Integer index = albumPositions.get(mi.getId());
                         if (index != null && index >= savedSharedAlbumList.size() - PREFETCH_DISTANCE
@@ -530,6 +559,194 @@ public class MainFragment extends BrowseSupportFragment {
                 }
             }
         });
+    }
+
+    void schedulePhotoDemandCheck() {
+        if (photoPaging == null || photoDemandCheckPosted) return;
+        photoDemandCheckPosted = true;
+        final long generation = requests.generation();
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation)) return;
+            photoDemandCheckPosted = false;
+            reconcilePhotoPageDemand();
+        });
+    }
+
+    /** Selection survives drawers and recycled holders; only the actual focused card owns demand. */
+    private View focusedPhotoWallCard() {
+        if (!isResumed() || getView() == null || !(getActivity() instanceof MainActivity)
+                || !((MainActivity) getActivity()).canFocusBrowseContent()) return null;
+        View view = getActivity().getCurrentFocus();
+        View card = null;
+        while (view != null) {
+            if (card == null && view.getTag(R.id.media_item_id) instanceof String) card = view;
+            if (view == getView()) return card;
+            ViewParent parent = view.getParent();
+            view = parent instanceof View ? (View) parent : null;
+        }
+        return null;
+    }
+
+    private boolean isPageFooter(View card) {
+        return card != null && "page_action".equals(card.getTag(R.id.media_item_type))
+                && "__page_action".equals(card.getTag(R.id.media_item_id));
+    }
+
+    private boolean photoWallHasFocus() {
+        RowsSupportFragment rows = getRowsSupportFragment();
+        return isResumed() && getActivity() instanceof MainActivity
+                && ((MainActivity) getActivity()).canFocusBrowseContent()
+                && rows != null && rows.getVerticalGridView() != null
+                && rows.getVerticalGridView().hasFocus();
+    }
+
+    private void reconcilePhotoPageDemand() {
+        if (photoPaging == null || currentMediaList == null || reflowingWall || photoFocusHandoffPending) return;
+        View card = focusedPhotoWallCard();
+        if (card == null) return;
+        boolean wasPaused = photoPageDemand.isPaused();
+        if (isPageFooter(card)) {
+            photoPageDemand.selectFooter(currentMediaList.size(), photoPaging.isLoading());
+        } else {
+            Integer index = photoPositions.get(card.getTag(R.id.media_item_id));
+            if (index == null) return;
+            photoPageDemand.selectPhoto(index, photoPaging.isLoading());
+        }
+        if (wasPaused && !photoPageDemand.isPaused()) updatePageFooter(photoPaging, currentMediaList.size());
+        // Record the latest focus even while busy, then retry on completion without another key event.
+        if (applyingPage || photoPaging.isLoading() || photoPaging.hasFailed()
+                || photoPaging.hasInvalidPage() || photoPaging.isStalled() || photoPaging.isOffsetLimited()) return;
+        int handoff = photoPageDemand.footerHandoffIndex(currentMediaList.size());
+        if (isPageFooter(card) && handoff >= 0) {
+            handoffPhotoPageFocus(handoff);
+            return;
+        }
+        if (!photoPaging.hasMore() || isWindowFull(photoPaging, currentMediaList.size())
+                || photoScan.isPaused()) return;
+        if (photoPageDemand.shouldLoad(currentMediaList.size(), PREFETCH_DISTANCE)) loadPhotoPage();
+    }
+
+    private void handoffPhotoPageFocus(int index) {
+        if (index < 0 || index >= currentMediaList.size() || !isPageFooter(focusedPhotoWallCard())) return;
+        photoFocusHandoffPending = true;
+        photoFocusHandoffTargetId = currentMediaList.get(index).getId();
+        final long handoff = ++photoFocusHandoffGeneration;
+        selectPhotoFocusTarget(photoFocusHandoffTargetId, requests.generation(), handoff);
+    }
+
+    private void restorePhotoFocusAfterLayout(String id, long generation, long handoff) {
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation) || handoff != photoFocusHandoffGeneration
+                    || !photoFocusHandoffPending) return;
+            selectPhotoFocusTarget(id, generation, handoff);
+        });
+    }
+
+    private void selectPhotoFocusTarget(final String id, final long generation, final long handoff) {
+        RowsSupportFragment rows = getRowsSupportFragment();
+        if (!isResumed() || !(getActivity() instanceof MainActivity)
+                || !((MainActivity) getActivity()).canFocusBrowseContent()
+                || rows == null || rows.getVerticalGridView() == null) {
+            finishPhotoFocusHandoff(generation, handoff);
+            return;
+        }
+        // A reflow may briefly detach the old focused card. An unrelated focused control must
+        // still win; only continue while the old wall owns focus (or the detached focus is null).
+        if (getActivity().getCurrentFocus() != null && focusedPhotoWallCard() == null && !photoWallHasFocus()) {
+            finishPhotoFocusHandoff(generation, handoff);
+            return;
+        }
+        int targetRow = -1;
+        for (int row = 0; row < mRowsAdapter.size() && targetRow < 0; row++) {
+            ObjectAdapter items = ((ListRow) mRowsAdapter.get(row)).getAdapter();
+            for (int column = 0; column < items.size(); column++) {
+                if (id.equals(((MediaItem) items.get(column)).getId())) { targetRow = row; break; }
+            }
+        }
+        if (targetRow < 0) {
+            finishPhotoFocusHandoff(generation, handoff);
+            return;
+        }
+        rows.setSelectedPosition(targetRow, false, new Presenter.ViewHolderTask() {
+            @Override public void run(Presenter.ViewHolder holder) {
+                if (!requests.isCurrent(generation) || handoff != photoFocusHandoffGeneration
+                        || !photoFocusHandoffPending) return;
+                if (!isResumed() || !(getActivity() instanceof MainActivity)
+                        || !((MainActivity) getActivity()).canFocusBrowseContent()) {
+                    finishPhotoFocusHandoff(generation, handoff);
+                    return;
+                }
+                View focusedCard = focusedPhotoWallCard();
+                // Selecting the row can itself move focus to its remembered column. With no new
+                // user input, finish this same handoff at the first appended item, not that old column.
+                if (holder instanceof ListRowPresenter.ViewHolder
+                        && (isPageFooter(focusedCard) || (focusedCard != null && holder.view.hasFocus())
+                        || (focusedCard == null && (photoWallHasFocus() || getActivity().getCurrentFocus() == null)))) {
+                    // Re-resolve the column from the item's ID: the wall may have reflowed meanwhile.
+                    Row row = ((ListRowPresenter.ViewHolder) holder).getRow();
+                    if (row instanceof ListRow) {
+                        ObjectAdapter items = ((ListRow) row).getAdapter();
+                        for (int column = 0; column < items.size(); column++) {
+                            if (!id.equals(((MediaItem) items.get(column)).getId())) continue;
+                            ListRowPresenter.SelectItemViewHolderTask task =
+                                    new ListRowPresenter.SelectItemViewHolderTask(column);
+                            task.setSmoothScroll(false);
+                            task.setItemTask(new Presenter.ViewHolderTask() {
+                                @Override public void run(Presenter.ViewHolder itemHolder) {
+                                    if (requests.isCurrent(generation) && handoff == photoFocusHandoffGeneration
+                                            && photoFocusHandoffPending && isResumed()
+                                            && getActivity() instanceof MainActivity
+                                            && ((MainActivity) getActivity()).canFocusBrowseContent()
+                                            && getActivity().getCurrentFocus() == null) {
+                                        itemHolder.view.requestFocus();
+                                    }
+                                    // Leanback may run this task before it applies the column selection.
+                                    positionHandler.post(() -> finishPhotoFocusHandoff(generation, handoff));
+                                }
+                            });
+                            task.run(holder);
+                            return;
+                        }
+                    }
+                }
+                // The row selection may already have focused a photo. Never redirect focus from
+                // another control; preserve the same episode for any focus moved by this handoff.
+                finishPhotoFocusHandoff(generation, handoff);
+            }
+        });
+    }
+
+    private void finishPhotoFocusHandoff(long generation, long handoff) {
+        if (!requests.isCurrent(generation) || handoff != photoFocusHandoffGeneration
+                || !photoFocusHandoffPending) return;
+        photoFocusHandoffPending = false;
+        photoFocusHandoffTargetId = null;
+        reflowingWall = false;
+        View card = focusedPhotoWallCard();
+        Integer index = card == null ? null : photoPositions.get(card.getTag(R.id.media_item_id));
+        if (index != null) {
+            photoPageDemand.handoffToPhoto(index);
+            if (photoPageDemand.isPaused()) updatePageFooter(photoPaging, currentMediaList.size());
+        }
+        schedulePhotoDemandCheck();
+    }
+
+    /** Called before dispatching new user input; the input itself retains its normal handling. */
+    void cancelPhotoFocusHandoff() {
+        if (!photoFocusHandoffPending) return;
+        photoFocusHandoffPending = false;
+        photoFocusHandoffGeneration++;
+        photoFocusHandoffTargetId = null;
+        reflowingWall = false;
+        schedulePhotoDemandCheck();
+    }
+
+    @Override public void onStop() {
+        photoFocusHandoffPending = false;
+        photoFocusHandoffGeneration++;
+        photoFocusHandoffTargetId = null;
+        reflowingWall = false;
+        super.onStop();
     }
     
     private void scheduleLazyLoad(int centerIndex) {
@@ -1536,16 +1753,26 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoPage(true);
             return;
         }
+        if (explicit) photoPageDemand.explicitContinue(currentMediaList.size());
+        if (!photoPageDemand.canStartRequest()) {
+            finishPhotoPage(true);
+            return;
+        }
         if (isFilteredPhotoMode() && !photoScan.start(explicit)) return;
         requestPhotoPage();
     }
 
     private void requestPhotoPage() {
+        if (!photoPageDemand.canStartRequest()) {
+            finishPhotoPage(true);
+            return;
+        }
         final int offset = photoPaging.begin();
         if (offset < 0) {
             finishPhotoPage(true);
             return;
         }
+        photoPageDemand.onRequestStarted();
         photoFailureMessage = null;
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
@@ -1635,10 +1862,20 @@ public class MainFragment extends BrowseSupportFragment {
                     requestPhotoPage();
                     return;
                 }
-                finishPhotoPage(true);
                 if (previousCount == 0 && !currentMediaList.isEmpty()) {
-                    positionHandler.post(() -> setSelectedPosition(0));
+                    final long generation = requests.generation();
+                    positionHandler.post(() -> {
+                        if (!requests.isCurrent(generation) || !isResumed()
+                                || !(getActivity() instanceof MainActivity)
+                                || !((MainActivity) getActivity()).canFocusBrowseContent()) return;
+                        if (isPageFooter(focusedPhotoWallCard()) && !photoFocusHandoffPending) {
+                            handoffPhotoPageFocus(0);
+                        } else if (getActivity().getCurrentFocus() == null) {
+                            restoreCardSelection(0, 0);
+                        }
+                    });
                 }
+                finishPhotoPage(true);
             }
             @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable error) {
                 photoPaging.fail();
@@ -1654,12 +1891,15 @@ public class MainFragment extends BrowseSupportFragment {
         if (detailPageCallback != null) {
             MediaListHolder.PageCallback callback = detailPageCallback;
             detailPageCallback = null;
-            if (success && photoScan.isPaused()) callback.onPaused(
-                    "已扫描 " + photoPaging.getOffset() + " 条，暂未找到更多匹配");
+            if (success && photoPaging.hasMore()
+                    && (photoScan.isPaused() || photoPageDemand.isPaused())) callback.onPaused(
+                    photoScan.isPaused() ? "已扫描 " + photoPaging.getOffset() + " 条，暂未找到更多匹配"
+                            : "本次自动加载已达 " + MetadataLimits.MAX_SCAN_PAGES + " 页");
             else if (success) callback.onLoaded(new ArrayList<>(currentMediaList),
                     photoPaging.hasMore() && !isWindowFull(photoPaging, currentMediaList.size()));
             else callback.onFailure();
         }
+        schedulePhotoDemandCheck();
     }
 
     private void showRootLoadFailure(Throwable error) {
@@ -1732,7 +1972,11 @@ public class MainFragment extends BrowseSupportFragment {
         currentMediaList = new ArrayList<>();
         photoPositions.clear();
         photoScan.reset();
-        lastFilteredAutoIndex = 0;
+        photoPageDemand.reset();
+        photoDemandCheckPosted = false;
+        photoFocusHandoffPending = false;
+        photoFocusHandoffGeneration++;
+        photoFocusHandoffTargetId = null;
         resetPagedRows();
         loadPhotoPage(true);
         positionHandler.post(() -> setSelectedPosition(0));
@@ -1791,7 +2035,10 @@ public class MainFragment extends BrowseSupportFragment {
         else if (state.isStalled()) status = "结果可能不完整 · 请返回";
         else if (isWindowFull(state, count)) status = "确定：下一批（替换本批" + count + "项）";
         else if (state == photoPaging && photoScan.isPaused()) status = scanPausedMessage();
-        else if (state.hasMore()) status = "确定：加载更多（本批 " + count + " 项）";
+        else if (state == photoPaging && state.hasMore() && photoPageDemand.isPaused()
+                && photoPageDemand.needsMore(count, PREFETCH_DISTANCE)) status = "确定：继续加载（本批 " + count + " 项）";
+        else if (state.hasMore()) status = state == photoPaging ? "继续向下浏览 · " + count + " 项"
+                : "确定：加载更多（本批 " + count + " 项）";
         else status = count == 0 ? (sharedAlbumDirectory ? "暂无共享相册"
                 : "shared_album".equals(photoMode) ? "相册为空" : "扫描到末尾 · 本批无匹配")
                 : "扫描到末尾 · 本批 " + count + " 项";
@@ -2216,7 +2463,15 @@ public class MainFragment extends BrowseSupportFragment {
                             callback.onLoaded(items, hasMore);
                         }
                         @Override public void onFailure() { callback.onFailure(); }
-                        @Override public void onPaused(String message) { callback.onPaused(message); }
+                        @Override public void onPaused(String message) {
+                            // The last permitted page may contain a new tail. Deliver it before
+                            // exposing the automatic scan boundary to a waiting detail screen.
+                            if (delivery.hasPending(currentMediaList.size())) {
+                                delivery.delivered(currentMediaList.size());
+                                callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore()
+                                        && !isWindowFull(photoPaging, currentMediaList.size()));
+                            } else callback.onPaused(message);
+                        }
                     };
                     // A list prefetch may already be in flight; its completion also serves this callback.
                     if (!photoPaging.isLoading()) loadPhotoPage(true);

@@ -78,12 +78,27 @@ Optional synthetic fault switches:
 python test/large_library_server.py --profile sparse-video --fail-once-offset 35
 python test/large_library_server.py --profile large-place --fail-first-location
 python test/large_library_server.py --profile sparse-video --gallery-delay-ms 3000
+python test/large_library_server.py --profile sparse-video --count 2400 \
+  --album-delay-ms 3000 --thumbnail-delay-ms 8000 \
+  --trace-file test/.generated/footer-requests.jsonl
+python test/large_library_server.py --profile sparse-video --fail-once-album-offset 35
 ```
 
 A one-shot HTTP 503 is followed by success at the **same** offset/request, without
 restarting the server. Delay is bounded to 10 seconds and enables Back/new-screen
 cancellation checks. These switches do not add API request parameters or expose
 remote fixture controls.
+
+For the slow-album scenario, open the synthetic album and press Down rapidly
+until the loading footer is focused. Stop pressing keys while the metadata page
+returns. Ordinary continuation should append photos and move focus from the
+footer to the newly available content without requiring OK. Thumbnails can
+still be pending: metadata pagination must not wait for image completion.
+`--thumbnail-delay-ms` delays only thumbnail routes, independently of gallery
+and album metadata. The gallery and album one-shot failures have separate
+offsets; a failed page must remain retryable at the same offset without an
+automatic retry loop. These scenarios require the current APK on a dedicated
+device; fixture contract tests alone do not verify Leanback focus.
 
 ### Short page without pagination metadata
 
