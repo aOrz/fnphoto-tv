@@ -3,9 +3,10 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="@drawable/bg_photo_tile"
+    android:foreground="@drawable/fg_photo_focus"
     android:focusable="true"
     android:focusableInTouchMode="true"
-    android:padding="3dp">
+    android:padding="4dp">
 
     <ImageView
         android:id="@+id/iv_photo"

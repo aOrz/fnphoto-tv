@@ -16,8 +16,8 @@
                 <shape android:shape="rectangle">
                     <corners android:radius="14dp" />
                     <stroke
-                        android:width="2dp"
-                        android:color="#CCFFFFFF" />
+                        android:width="3dp"
+                        android:color="@color/focus_ring" />
                 </shape>
             </item>
         </layer-list>

@@ -67,7 +67,6 @@ public class MainActivity extends FragmentActivity {
     // RecyclerView Adapter for menu
     public class MenuAdapter extends RecyclerView.Adapter<MenuAdapter.ViewHolder> {
         private List<MenuItem> items = new ArrayList<>();
-        private int selectedPosition = -1;
         
         public void add(MenuItem item) {
             items.add(item);
@@ -89,16 +88,6 @@ public class MainActivity extends FragmentActivity {
         public void onBindViewHolder(ViewHolder holder, int position) {
             MenuItem item = items.get(position);
             holder.textView.setText(item.title);
-            
-            // 设置焦点监听
-            holder.itemView.setOnFocusChangeListener((v, hasFocus) -> {
-                if (hasFocus) {
-                    selectedPosition = position;
-                    v.setBackgroundResource(R.drawable.bg_menu_item);
-                } else {
-                    v.setBackgroundResource(0);
-                }
-            });
         }
         
         @Override
