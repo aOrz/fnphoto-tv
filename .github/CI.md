@@ -4,6 +4,11 @@ The `Android CI` workflow runs for pushes to `main`, pull requests targeting
 `main` (including drafts), and manual dispatches. It does not publish a release,
 deploy the app, or use release-signing credentials.
 
+While the remembered-browse-type feature is stacked on `fix/large-library-boundaries`,
+that exact pull-request base also runs the same checks. Remove the additional base
+filter when the dependency is merged and the feature PR is retargeted to `main`;
+workflow permissions and build jobs are unchanged.
+
 ## Checks and artifacts
 
 The single `Debug build and unit tests` job installs Android SDK platform 29 and

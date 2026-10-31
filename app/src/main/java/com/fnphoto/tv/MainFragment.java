@@ -42,6 +42,8 @@ import retrofit2.converter.gson.GsonConverterFactory;
 
 public class MainFragment extends BrowseSupportFragment {
     private static final String TAG = "MainFragment";
+    private BrowseMode rootBrowseMode = BrowseMode.GALLERY;
+    private boolean rootBrowseLoaded;
     private static final int PREVIEW_LOAD_DELAY = 300; // 延迟加载时间
     private static final int VISIBLE_RANGE_BUFFER = 6; // 可视范围前后的缓冲数量
 
@@ -153,6 +155,78 @@ public class MainFragment extends BrowseSupportFragment {
                 .getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE).getLong("collect_revision", 0L);
     }
 
+    void loadBrowseMode(BrowseMode mode) {
+        if (api == null || token == null || token.isEmpty()) {
+            beginRootScreen(mode);
+            rootLoadFailed();
+            return;
+        }
+        switch (mode) {
+            case FOLDERS: loadFolders(); break;
+            case FAVORITES: loadFavorites(); break;
+            case RECENT: loadRecent(); break;
+            case ALBUMS: loadAlbums(); break;
+            case PEOPLE: loadPeople(); break;
+            case PLACES: loadPlaces(); break;
+            case PHOTOS: loadMediaType("photo"); break;
+            case VIDEOS: loadMediaType("video"); break;
+            default: loadTimeline(); break;
+        }
+    }
+
+    private void rootLoadSucceeded() {
+        if (rootBrowseLoaded) return;
+        rootBrowseLoaded = true;
+        if (mRowsAdapter.size() == 0) showEmptyState("暂无内容");
+        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).onBrowseModeLoaded(rootBrowseMode);
+        focusBrowseContent();
+    }
+
+    private void rootLoadFailed() {
+        rootLoadFailed("加载失败，按确定重试，或按菜单切换浏览类型");
+    }
+
+    private void rootLoadFailed(Throwable error) {
+        Log.e(TAG, "元数据加载失败", error);
+        rootLoadFailed(isMetadataLimit(error)
+                ? "响应超过安全大小，未显示结果；请改用相册、文件夹或搜索缩小范围"
+                : "加载失败，按确定重试，或按菜单切换浏览类型");
+    }
+
+    private void rootLoadFailed(String message) {
+        hideLoadingOverlay();
+        showEmptyState(message);
+        ArrayObjectAdapter retry = new ArrayObjectAdapter(mCardPresenter);
+        retry.add(new MediaItem("__root_retry", "重新加载" + rootBrowseMode.title, "root_retry", null, null));
+        mRowsAdapter.add(new ListRow(new HeaderItem("重试"), retry));
+        rootRequestFailed();
+    }
+
+    private void rootRequestFailed() {
+        focusBrowseContent();
+        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).onBrowseModeFailed(rootBrowseMode);
+    }
+
+    void focusBrowseContent() {
+        final long generation = requests.generation();
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation) || !(getActivity() instanceof MainActivity)) return;
+            MainActivity activity = (MainActivity) getActivity();
+            if (!activity.canFocusBrowseContent()) return;
+            boolean hasCards = false;
+            for (int i = 0; i < mRowsAdapter.size(); i++) {
+                Object row = mRowsAdapter.get(i);
+                if (row instanceof ListRow && ((ListRow) row).getAdapter().size() > 0) {
+                    hasCards = true;
+                    break;
+                }
+            }
+            RowsSupportFragment rows = getRowsSupportFragment();
+            if (!hasCards || rows == null || rows.getVerticalGridView() == null
+                    || !rows.getVerticalGridView().requestFocus()) activity.focusBrowseMenuButton();
+        });
+    }
+
     @Override public void onResume() {
         super.onResume();
         if (getActivity() == null) return;
@@ -220,8 +294,11 @@ public class MainFragment extends BrowseSupportFragment {
         hideLoadingOverlay();
     }
 
-    private void beginRootScreen() {
+    private void beginRootScreen(BrowseMode mode) {
         beginScreen();
+        rootBrowseMode = mode;
+        rootBrowseLoaded = false;
+        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).onBrowseModeStarted(mode);
         favoritesTimeline = false;
         timelineLimited = peopleLimited = personTimelineLimited = placesLimited = false;
         photoMode = null;
@@ -290,7 +367,9 @@ public class MainFragment extends BrowseSupportFragment {
                 if (item instanceof MediaItem) {
                     MediaItem mediaItem = (MediaItem) item;
                     
-                    if ("geo_retry".equals(mediaItem.getType()) && geoRetryItem != null) {
+                    if ("root_retry".equals(mediaItem.getType())) {
+                        if (getActivity() instanceof MainActivity) ((MainActivity) getActivity()).retryBrowseMode(rootBrowseMode);
+                    } else if ("geo_retry".equals(mediaItem.getType()) && geoRetryItem != null) {
                         loadPhotosByGeo(geoRetryItem);
                     } else if ("boundary_notice".equals(mediaItem.getType())) {
                         new android.app.AlertDialog.Builder(getActivity()).setMessage(mediaItem.getDateStr())
@@ -528,26 +607,25 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
-        beginRootScreen();
+        beginRootScreen(BrowseMode.GALLERY);
         showLoadingOverlay("正在加载...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", null);
 
         enqueue(api.getTimeline(token, authx, null), new Callback<FnHttpApi.TimelineResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.TimelineResponse> call, 
-                                   Response<FnHttpApi.TimelineResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.TimelineResponse> call,
+                    Response<FnHttpApi.TimelineResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.TimelineResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayTimeline(result.data.list);
-                    }
+                FnHttpApi.TimelineResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayTimeline(result.data.list);
+                    rootLoadSucceeded();
+                } else {
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
@@ -610,7 +688,7 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
-        beginRootScreen();
+        beginRootScreen(BrowseMode.FOLDERS);
         showLoadingOverlay("正在加载文件夹...");
         Boolean desc = false;
         Integer orderBy = 2;
@@ -623,25 +701,20 @@ public class MainFragment extends BrowseSupportFragment {
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/folder/list", "GET", params);
 
         enqueue(api.getManagedFolders(token, authx, desc, orderBy), new Callback<FnHttpApi.FolderListResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.FolderListResponse> call,
-                                   Response<FnHttpApi.FolderListResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.FolderListResponse> call,
+                    Response<FnHttpApi.FolderListResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.FolderListResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayFolders(result.data.list);
-                    } else {
-                        Log.e(TAG, "加载文件夹失败: code=" + result.code + ", msg=" + result.msg);
-                    }
+                FnHttpApi.FolderListResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayFolders(result.data.list);
+                    rootLoadSucceeded();
                 } else {
-                    Log.e(TAG, "加载文件夹失败: HTTP " + response.code());
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.FolderListResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.FolderListResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
@@ -701,7 +774,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     public void loadAlbums() {
         if (api == null || token == null || token.isEmpty()) return;
-        beginRootScreen();
+        beginRootScreen(BrowseMode.ALBUMS);
         albumPaging = new MainPagingState(PAGE_SIZE);
         savedAlbumList = new ArrayList<>();
         displayAlbums(savedAlbumList);
@@ -773,6 +846,10 @@ public class MainFragment extends BrowseSupportFragment {
                     applyingPage = false;
                 }
                 updatePageFooter(albumPaging, savedAlbumList.size());
+                if (offset == 0) {
+                    if (albumPaging.hasFailed()) { rootRequestFailed(); return; }
+                    rootLoadSucceeded();
+                }
                 if (offset == 0 && !savedAlbumList.isEmpty()) {
                     positionHandler.post(() -> setSelectedPosition(0));
                 }
@@ -781,6 +858,7 @@ public class MainFragment extends BrowseSupportFragment {
                 albumPaging.fail();
                 albumFailureMessage = metadataFailureMessage(error);
                 updatePageFooter(albumPaging, savedAlbumList.size());
+                if (offset == 0) rootRequestFailed();
             }
         });
     }
@@ -1018,7 +1096,7 @@ public class MainFragment extends BrowseSupportFragment {
     public void loadMediaType(String category) {
         if (api == null || token == null || token.isEmpty()
                 || !("photo".equals(category) || "video".equals(category))) return;
-        beginRootScreen();
+        beginRootScreen("video".equals(category) ? BrowseMode.VIDEOS : BrowseMode.PHOTOS);
         photoCategory = category;
         final String title = "video".equals(category) ? "视频" : "照片";
         showLoadingOverlay("正在加载" + title + "...");
@@ -1030,18 +1108,19 @@ public class MainFragment extends BrowseSupportFragment {
                 FnHttpApi.TimelineResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || result.data.list == null || result.data.list.contains(null)) {
-                    showEmptyState("加载失败，请重新选择媒体类型重试");
+                    rootLoadFailed();
                     return;
                 }
                 TimelineDateRange range = new TimelineDateRange();
                 for (FnHttpApi.TimelineItem item : result.data.list) {
                     if (!range.add(item.year, item.month, item.day)) {
-                        showEmptyState("时间线日期无效，无法可靠确定媒体范围；请重新选择此分类重试");
+                        rootLoadFailed("时间线日期无效，无法可靠确定媒体范围；请重新选择此分类重试");
                         return;
                     }
                 }
                 if (range.isEmpty()) {
                     showEmptyState("暂无" + title);
+                    rootLoadSucceeded();
                     return;
                 }
                 photoRangeStart = range.firstDate() + " 00:00:00";
@@ -1049,7 +1128,8 @@ public class MainFragment extends BrowseSupportFragment {
                 startPhotoPaging("media_type", title);
             }
             @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
-                showRootLoadFailure(error);
+                hideLoadingOverlay();
+                rootLoadFailed(error);
             }
         });
     }
@@ -1073,7 +1153,7 @@ public class MainFragment extends BrowseSupportFragment {
         }
 
         int previousPosition = savedTimelinePosition;
-        beginRootScreen();
+        beginRootScreen(BrowseMode.FAVORITES);
         if (restorePosition) savedTimelinePosition = previousPosition;
         favoritesTimeline = true;
         showLoadingOverlay("正在加载收藏...");
@@ -1081,24 +1161,21 @@ public class MainFragment extends BrowseSupportFragment {
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", params);
 
         enqueue(api.getTimeline(token, authx, 1), new Callback<FnHttpApi.TimelineResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.TimelineResponse> call,
-                                   Response<FnHttpApi.TimelineResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.TimelineResponse> call,
+                    Response<FnHttpApi.TimelineResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.TimelineResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        if (result.data.list.isEmpty()) showEmptyState("暂无收藏");
-                        else displayTimeline(result.data.list);
-                    } else {
-                        showEmptyState("暂无收藏");
-                    }
+                FnHttpApi.TimelineResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    if (result.data.list.isEmpty()) showEmptyState("暂无收藏");
+                    else displayTimeline(result.data.list);
+                    rootLoadSucceeded();
+                } else {
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
@@ -1109,28 +1186,25 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
-        beginRootScreen();
+        beginRootScreen(BrowseMode.RECENT);
         showLoadingOverlay("正在加载最近照片...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/explore/recent_timeline", "GET", null);
 
         enqueue(api.getRecentTimeline(token, authx), new Callback<FnHttpApi.TimelineResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.TimelineResponse> call,
-                                   Response<FnHttpApi.TimelineResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.TimelineResponse> call,
+                    Response<FnHttpApi.TimelineResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.TimelineResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayTimeline(result.data.list);
-                    } else {
-                        showEmptyState("暂无照片");
-                    }
+                FnHttpApi.TimelineResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayTimeline(result.data.list);
+                    rootLoadSucceeded();
+                } else {
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
@@ -1141,29 +1215,26 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
-        beginRootScreen();
+        beginRootScreen(BrowseMode.PLACES);
         showLoadingOverlay("正在加载地点...");
         String params = "offset=0&limit=-1";
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/explore/geos", "GET", params);
 
         enqueue(api.getGeos(token, authx, 0, -1), new Callback<FnHttpApi.GeoListResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.GeoListResponse> call,
-                                   Response<FnHttpApi.GeoListResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.GeoListResponse> call,
+                    Response<FnHttpApi.GeoListResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.GeoListResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayPlaces(result.data.list);
-                    } else {
-                        showEmptyState("暂无地点");
-                    }
+                FnHttpApi.GeoListResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayPlaces(result.data.list);
+                    rootLoadSucceeded();
+                } else {
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.GeoListResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.GeoListResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
@@ -1300,6 +1371,7 @@ public class MainFragment extends BrowseSupportFragment {
                         || result.data == null || !validPage(result.data.list, PHOTO_PAGE_SIZE)) {
                     photoPaging.fail();
                     finishPhotoPage(false);
+                    if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
                     return;
                 }
                 int previousCount = currentMediaList.size();
@@ -1330,8 +1402,10 @@ public class MainFragment extends BrowseSupportFragment {
                 applyingPage = false;
                 if (photoPaging.hasFailed()) {
                     finishPhotoPage(false);
+                    if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
                     return;
                 }
+                if ("media_type".equals(photoMode)) rootLoadSucceeded();
                 // Sparse filters get a finite raw-page budget per action. The
                 // paused footer, not a false "empty/end", invites explicit continuation.
                 if (isFilteredPhotoMode() && photoScan.acceptPage(
@@ -1348,6 +1422,7 @@ public class MainFragment extends BrowseSupportFragment {
                 photoPaging.fail();
                 photoFailureMessage = metadataFailureMessage(error);
                 finishPhotoPage(false);
+                if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
             }
         });
     }
@@ -1688,28 +1763,25 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
-        beginRootScreen();
+        beginRootScreen(BrowseMode.PEOPLE);
         showLoadingOverlay("正在加载人物...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/ai-person/list", "GET", "getAll=true&limit=-1&orderBy=0");
 
         enqueue(api.getPersonList(token, authx, true, -1, 0), new Callback<FnHttpApi.PersonListResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.PersonListResponse> call,
-                                   Response<FnHttpApi.PersonListResponse> response) {
+            @Override public void onResponse(Call<FnHttpApi.PersonListResponse> call,
+                    Response<FnHttpApi.PersonListResponse> response) {
                 hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.PersonListResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayPeople(result.data.list);
-                    } else {
-                        showEmptyState("暂无人物");
-                    }
+                FnHttpApi.PersonListResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null && !result.data.list.contains(null)) {
+                    displayPeople(result.data.list);
+                    rootLoadSucceeded();
+                } else {
+                    rootLoadFailed();
                 }
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.PersonListResponse> call, Throwable t) {
-                showRootLoadFailure(t);
+            @Override public void onFailure(Call<FnHttpApi.PersonListResponse> call, Throwable error) {
+                rootLoadFailed(error);
             }
         });
     }
