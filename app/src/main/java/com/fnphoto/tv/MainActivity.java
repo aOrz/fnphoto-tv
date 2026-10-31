@@ -313,10 +313,13 @@ public class MainActivity extends FragmentActivity {
 
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && drawerLayout != null && getCurrentFocus() == null) {
+        if (hasFocus && drawerLayout != null) {
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
-            if (fragment != null) fragment.focusBrowseContent();
+            if (fragment != null) {
+                if (getCurrentFocus() == null) fragment.focusBrowseContent();
+                fragment.schedulePhotoDemandCheck();
+            }
         }
     }
 
@@ -444,6 +447,17 @@ public class MainActivity extends FragmentActivity {
         intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(intent);
         finish();
+    }
+
+    private void cancelPendingPhotoFocusHandoff() {
+        androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
+                .findFragmentById(R.id.main_content_container);
+        if (fragment instanceof MainFragment) ((MainFragment) fragment).cancelPhotoFocusHandoff();
+    }
+
+    @Override public void onUserInteraction() {
+        super.onUserInteraction();
+        cancelPendingPhotoFocusHandoff();
     }
 
     @Override

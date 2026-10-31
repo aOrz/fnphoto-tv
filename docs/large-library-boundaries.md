@@ -43,6 +43,15 @@ idle. Focus-triggered continuation is suppressed after a budget pause; an
 explicit action grants another budget. Favorite-date covers use the same finite
 five-page bound and retain at most four thumbnail URLs.
 
+Paged photo walls also cap each automatic focus demand at five raw pages.
+Demand survives an in-flight request and is rechecked after appending rows, but
+the footer remains anchored to the count when it was first focused. Newly
+appended content receives focus only if that footer still owns actual focus;
+this handoff does not start a fresh budget. Thus short pages or pages with a few
+matches cannot continuously replenish the sparse-scan budget through response
+callbacks. Failure, exhausted budgets and full windows retain explicit actions.
+The metadata request does not wait for pending thumbnail downloads.
+
 A detail boundary uses a distinct pause callback rather than an empty terminal
 page. Waiting is released, slideshow is stopped, and the right key can explicitly
 continue. Back or a newer root/query invalidates old callbacks. Failed pages can

@@ -55,7 +55,7 @@
 | 焦点、卡片复用 | `FocusImageCardView`、`CardPresenter`、`MainFragment.focusBrowseContent`、`item_photo_grid.xml`；另做设备 QA |
 | 空/加载/错误状态 | `TvStateView`、`BrowseStatus`、`GridScreenState` 及同名状态测试；设备 `EmptyStateDeviceTest`，见 [TV 列表状态](../empty-states.md) |
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
-| 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget` 及同名 Test |
+| 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget`、`PhotoPageDemand` 及同名 Test |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |
 | 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPreloadScope`、`DetailPlaybackState`、`DetailSessionStore`；`VideoRemoteInput`、`VideoSeekState`、`VideoControls`；`MediaDetailLifecycleTest`、`DetailPreloadScopeTest`、`player/*Test`，设备测试 `VideoRemoteInstrumentationTest` |
 | 图片生命周期 | `cache/CachedImageLoader`、`ImageRequestScope`、`ImageCacheManager`；`ImagePipelineTest` |
@@ -70,6 +70,9 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 日期预览持续滚动时按最新焦点节流派发，拼图逐张显示；详情的缩略图可见状态与主图完成
 分开，预取成为当前图时保留到主图请求结束。实现边界见
 [图片、缓存与视频](constraints.md#图片缓存与视频)，行为说明见 [加载说明](../performance.md)。
+分页照片墙在靠近页尾或实际聚焦底部状态卡时请求下一页，完成后重新检查需求；
+底部交接到新增照片前重新核对实际焦点和页面代数。一次自动需求最多请求五个原始页，
+失败、稀疏暂停和窗口边界仍需明确操作，设备场景见 QA 清单 A15–A18。
 
 ## 已有文档的用途与冲突处理
 
