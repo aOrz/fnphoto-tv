@@ -68,6 +68,23 @@ public class MediaDetailActivity extends FragmentActivity {
     private PlayerView playerView;
     private SimpleExoPlayer player;
     private android.media.MediaPlayer fallbackPlayer;
+    private final VideoRemoteInput remoteInput = new VideoRemoteInput();
+    private final VideoSeekState fallbackSeek = new VideoSeekState();
+    private VideoControls videoControls;
+    private View videoSurface;
+    private boolean fallbackSeekable = true;
+    private boolean videoReadyHintShown;
+    private final Handler controlsHandler = new Handler(Looper.getMainLooper());
+    private final Runnable hideVideoHint = () -> {
+        if (videoControls != null) videoControls.hideHint();
+    };
+    private final Runnable refreshVideoControls = new Runnable() {
+        @Override public void run() {
+            if (videoControls == null) return;
+            updateVideoControls();
+            controlsHandler.postDelayed(this, 500);
+        }
+    };
     private final DetailLoadState loadState = new DetailLoadState();
     private final DetailLoadState navigationState = new DetailLoadState();
     private final DetailPlaybackState fallbackPlayback = new DetailPlaybackState();
@@ -127,6 +144,7 @@ public class MediaDetailActivity extends FragmentActivity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
         container = new FrameLayout(this);
+        container.setFocusableInTouchMode(true);
         container.setLayoutParams(new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -205,6 +223,9 @@ public class MediaDetailActivity extends FragmentActivity {
         isZoomed = false;
 
         container.removeAllViews();
+        // A photo reached from touch-operated video also needs a focus owner, so its first
+        // LEFT/RIGHT reaches the existing browsing handler instead of just leaving touch mode.
+        container.requestFocus();
         hideInfoOverlay();
         showLoading();
 
@@ -311,6 +332,7 @@ public class MediaDetailActivity extends FragmentActivity {
         // Overlay a small view instead of allocating another full-screen ARGB bitmap.
         TextView playButton = new TextView(this);
         playButton.setText("▶");
+        playButton.setContentDescription(getString(R.string.video_play));
         playButton.setTextSize(48);
         playButton.setGravity(Gravity.CENTER);
         playButton.setTextColor(Color.WHITE);
@@ -332,10 +354,23 @@ public class MediaDetailActivity extends FragmentActivity {
         };
         target.setOnClickListener(play);
         playButton.setOnClickListener(play);
+        TextView previewHelp = new TextView(this);
+        previewHelp.setText(R.string.video_preview_help);
+        previewHelp.setTextColor(Color.WHITE);
+        previewHelp.setTextSize(18);
+        previewHelp.setGravity(Gravity.CENTER);
+        previewHelp.setPadding(24, 12, 24, 12);
+        previewHelp.setBackgroundColor(0xCC202020);
+        container.addView(previewHelp, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
     }
 
     private void releasePlayers() {
         clearVideoTimeout();
+        controlsHandler.removeCallbacksAndMessages(null);
+        videoControls = null;
+        videoSurface = null;
+        fallbackSeek.reset();
+        videoReadyHintShown = false;
         fallbackPlayback.reset();
         if (playerView != null) playerView.setPlayer(null);
         if (player != null) {
@@ -349,6 +384,7 @@ public class MediaDetailActivity extends FragmentActivity {
             old.setOnErrorListener(null);
             old.setOnCompletionListener(null);
             old.setOnInfoListener(null);
+            old.setOnSeekCompleteListener(null);
             old.release();
         }
         playerView = null;
@@ -379,6 +415,9 @@ public class MediaDetailActivity extends FragmentActivity {
     private void setupExoPlayer(String videoUrl) {
         try {
             playerView = new PlayerView(this);
+            // All input is routed before child dispatch; do not run two competing controllers.
+            playerView.setUseController(false);
+            playerView.setFocusable(false);
             playerView.setLayoutParams(new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT));
@@ -405,10 +444,11 @@ public class MediaDetailActivity extends FragmentActivity {
                         return;
                     }
                     Log.w(TAG, "ExoPlayer format/decoder failure; trying platform player", error);
+                    boolean playIntent = requestedPlayer.getPlayWhenReady();
                     releasePlayers();
                     container.removeAllViews();
                     showLoading();
-                    setupMediaPlayer(videoUrl);
+                    setupMediaPlayer(videoUrl, playIntent);
                 }
 
                 @Override
@@ -418,11 +458,17 @@ public class MediaDetailActivity extends FragmentActivity {
                     if (playbackState == Player.STATE_READY) {
                         clearVideoTimeout();
                         hideLoading();
+                        showReadyVideoHint();
                     }
                     if (playbackState == Player.STATE_ENDED) {
                         clearVideoTimeout();
                         if (slideshowActive) {
                             switchToNext();
+                        }
+                        // Match the platform player's completed state: rewinding from the end
+                        // stays paused until an explicit Play/OK, instead of silently resuming.
+                        if (!slideshowActive && player == requestedPlayer && playWhenReady) {
+                            requestedPlayer.setPlayWhenReady(false);
                         }
                     }
                 }
@@ -436,14 +482,16 @@ public class MediaDetailActivity extends FragmentActivity {
             showLoading();
             player.prepare(mediaSource);
             player.setPlayWhenReady(true);
+            createVideoControls();
         } catch (Exception | LinkageError e) {
             VideoPlaybackFailure failure = VideoPlaybackFailure.classify(e);
             if (failure.shouldFallback()) {
                 Log.w(TAG, "ExoPlayer initialization compatibility failure; trying platform player", e);
+                boolean playIntent = player == null || player.getPlayWhenReady();
                 releasePlayers();
                 container.removeAllViews();
                 showLoading();
-                setupMediaPlayer(videoUrl);
+                setupMediaPlayer(videoUrl, playIntent);
             } else {
                 Log.w(TAG, "ExoPlayer initialization failed", e);
                 showVideoError(failure.getUserMessage());
@@ -451,7 +499,7 @@ public class MediaDetailActivity extends FragmentActivity {
         }
     }
 
-    private void setupMediaPlayer(String videoUrl) {
+    private void setupMediaPlayer(String videoUrl, boolean playIntent) {
         // Platform MediaPlayer does not expose per-hop redirect/header policy. Never bypass the
         // protected OkHttp transport for received media, even after a decoder/format failure.
         if (getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)) {
@@ -468,6 +516,8 @@ public class MediaDetailActivity extends FragmentActivity {
             final android.media.MediaPlayer mp = new android.media.MediaPlayer();
             fallbackPlayer = mp;
             fallbackPlayback.reset();
+            fallbackPlayback.setPlayWhenReady(playIntent);
+            fallbackSeekable = true;
             final long generation = loadState.next();
             java.util.Map<String, String> headers = new java.util.HashMap<>();
             headers.put("accesstoken", token != null ? token : "");
@@ -506,6 +556,7 @@ public class MediaDetailActivity extends FragmentActivity {
                 clearVideoTimeout();
                 hideLoading();
                 fallbackPlayback.prepared();
+                showReadyVideoHint();
                 try {
                     if (fallbackPlayback.shouldPlay()) mp2.start();
                 } catch (RuntimeException failure) {
@@ -528,19 +579,189 @@ public class MediaDetailActivity extends FragmentActivity {
                 } else if (what == android.media.MediaPlayer.MEDIA_INFO_BUFFERING_END) {
                     clearVideoTimeout();
                     hideLoading();
+                } else if (what == android.media.MediaPlayer.MEDIA_INFO_NOT_SEEKABLE) {
+                    fallbackSeekable = false;
                 }
                 return false;
+            });
+            mp.setOnSeekCompleteListener(mp2 -> {
+                if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
+                Long next = fallbackSeek.completed();
+                if (next != null) {
+                    try { mp2.seekTo((int) (long) next); }
+                    catch (RuntimeException failure) {
+                        showVideoError(VideoPlaybackFailure.classify(failure).getUserMessage());
+                    }
+                }
             });
             mp.setOnCompletionListener(mp2 -> {
                 if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
                 clearVideoTimeout();
+                fallbackPlayback.setPlayWhenReady(false);
                 if (slideshowActive) {
                     switchToNext();
                 }
             });
+            createVideoControls();
         } catch (Exception e) {
             Log.w(TAG, "MediaPlayer initialization failed", e);
             showVideoError(VideoPlaybackFailure.classify(e).getUserMessage());
+        }
+    }
+
+    private void createVideoControls() {
+        videoSurface = new View(this);
+        // Keep focus after touch input too; otherwise ViewRoot consumes the first DPAD
+        // merely leaving touch mode before our dispatchKeyEvent can see it.
+        videoSurface.setFocusableInTouchMode(true);
+        videoSurface.setContentDescription(getString(R.string.video_surface));
+        videoSurface.setOnClickListener(v -> showVideoControls());
+        container.addView(videoSurface, new FrameLayout.LayoutParams(-1, -1));
+        videoControls = new VideoControls(this, container, new VideoControls.Listener() {
+            @Override public void seekBy(long delta) { seekVideo(delta, false); }
+            @Override public void seekTo(long position) { seekVideo(position, true); }
+            @Override public void togglePlayback() { setVideoPlaying(null); }
+            @Override public void navigate(boolean next) { navigateManually(next); }
+            @Override public void close() { hideVideoControls(); }
+        });
+        videoSurface.requestFocus();
+        controlsHandler.post(refreshVideoControls);
+        showVideoHint(getString(R.string.video_remote_help));
+    }
+
+    private void showVideoControls() {
+        if (videoControls == null) return;
+        stopAutomaticAdvance();
+        updateVideoControls();
+        videoSurface.setFocusable(false);
+        videoControls.show();
+    }
+
+    private void hideVideoControls() {
+        if (videoControls == null) return;
+        videoControls.hide();
+        videoSurface.setFocusable(true);
+        videoSurface.requestFocus();
+        showVideoHint(getString(R.string.video_remote_help));
+    }
+
+    private void showVideoHint(String message) {
+        if (videoControls == null) return;
+        videoControls.hint(message);
+        controlsHandler.removeCallbacks(hideVideoHint);
+        controlsHandler.postDelayed(hideVideoHint, 6000);
+    }
+
+    private void showReadyVideoHint() {
+        if (!videoReadyHintShown) {
+            videoReadyHintShown = true;
+            showVideoHint(getString(R.string.video_remote_help));
+        }
+    }
+
+    private long videoDuration() {
+        if (player != null) return player.getDuration();
+        if (fallbackPlayer != null && fallbackPlayback.isPrepared()) return fallbackPlayer.getDuration();
+        return -1;
+    }
+
+    private long videoPosition() {
+        if (player != null) return player.getCurrentPosition();
+        if (fallbackPlayer != null && fallbackPlayback.isPrepared()) {
+            return fallbackSeek.displayedPosition(fallbackPlayer.getCurrentPosition());
+        }
+        return 0;
+    }
+
+    private boolean videoSeekable() {
+        return videoDuration() > 0 && (player != null ? player.isCurrentWindowSeekable()
+                : fallbackPlayer != null && fallbackPlayback.isPrepared() && fallbackSeekable);
+    }
+
+    private boolean videoPlayRequested() {
+        return player != null ? player.getPlayWhenReady() && player.getPlaybackState() != Player.STATE_ENDED
+                : fallbackPlayback.isPlayRequested();
+    }
+
+    private void updateVideoControls() {
+        if (videoControls == null) return;
+        try {
+            videoControls.update(videoPosition(), videoDuration(), videoPlayRequested(), videoSeekable());
+        } catch (IllegalStateException ignored) {
+            // Platform callbacks may report a failure before the error screen releases the player.
+        }
+    }
+
+    private void stopAutomaticAdvance() {
+        if (slideshowActive) stopSlideshow();
+    }
+
+    private void navigateManually(boolean next) {
+        stopAutomaticAdvance();
+        if (next) switchToNext(); else switchToPrevious();
+    }
+
+    private void seekVideo(long value, boolean absolute) {
+        stopAutomaticAdvance();
+        try {
+            if (!videoSeekable()) {
+                showVideoHint(getString(R.string.video_seek_unavailable));
+                if (videoControls != null) videoControls.announce(getString(R.string.video_seek_unavailable));
+                return;
+            }
+            long duration = videoDuration();
+            long target = absolute ? VideoSeekState.target(value, duration, 0)
+                    : VideoSeekState.target(videoPosition(), duration, value);
+            if (player != null) {
+                player.seekTo(target);
+            } else if (fallbackPlayer != null) {
+                Long next = fallbackSeek.requestAbsolute(duration, target);
+                if (next != null) fallbackPlayer.seekTo((int) (long) next);
+            }
+            String message = getString(R.string.video_seek_position,
+                    VideoControls.time(target), VideoControls.time(duration));
+            showVideoHint(message);
+            // Announce the final requested position once a burst of repeats has settled.
+            controlsHandler.removeCallbacks(announceSeek);
+            seekAnnouncement = message;
+            controlsHandler.postDelayed(announceSeek, 500);
+            updateVideoControls();
+        } catch (RuntimeException failure) {
+            showVideoError(VideoPlaybackFailure.classify(failure).getUserMessage());
+        }
+    }
+
+    private String seekAnnouncement;
+    private final Runnable announceSeek = () -> {
+        if (videoControls != null && seekAnnouncement != null) videoControls.announce(seekAnnouncement);
+    };
+
+    /** null toggles; dedicated PLAY/PAUSE are idempotent, including while preparing. */
+    private void setVideoPlaying(Boolean requested) {
+        stopAutomaticAdvance();
+        boolean play = requested != null ? requested : !videoPlayRequested();
+        try {
+            if (player != null) {
+                if (play && player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
+                player.setPlayWhenReady(play);
+            } else if (fallbackPlayer != null) {
+                fallbackPlayback.setPlayWhenReady(play);
+                if (fallbackPlayback.isPrepared()) {
+                    if (play) {
+                        if (videoDuration() > 0 && videoPosition() >= videoDuration()) {
+                            Long next = fallbackSeek.requestAbsolute(videoDuration(), 0);
+                            if (next != null) fallbackPlayer.seekTo((int) (long) next);
+                        }
+                        fallbackPlayer.start();
+                    } else fallbackPlayer.pause();
+                }
+            } else if (play && currentVideoItem != null) {
+                startVideoPlayback(currentVideoItem);
+            }
+            showVideoHint(getString(play ? R.string.video_play : R.string.video_pause));
+            updateVideoControls();
+        } catch (RuntimeException failure) {
+            showVideoError(VideoPlaybackFailure.classify(failure).getUserMessage());
         }
     }
 
@@ -647,14 +868,16 @@ public class MediaDetailActivity extends FragmentActivity {
                     if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
                     hideLoading();
                     if (slideshowActive) stopSlideshow();
-                    Toast.makeText(MediaDetailActivity.this, "加载下一页失败，按右键重试", Toast.LENGTH_LONG).show();
+                    Toast.makeText(MediaDetailActivity.this, isVideoPlaying
+                            ? "加载下一页失败，请在操作栏选择下一项重试" : "加载下一页失败，按右键重试", Toast.LENGTH_LONG).show();
                 }
                 @Override public void onPaused(String message) {
                     if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
                     hideLoading();
                     if (slideshowActive) stopSlideshow();
                     Toast.makeText(MediaDetailActivity.this,
-                            message + "；按右键继续扫描或返回退出", Toast.LENGTH_LONG).show();
+                            message + (isVideoPlaying ? "；在操作栏选择下一项继续扫描或返回退出"
+                                    : "；按右键继续扫描或返回退出"), Toast.LENGTH_LONG).show();
                 }
             });
         } else {
@@ -980,7 +1203,72 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     @Override
+    @android.annotation.SuppressLint("RestrictedApi") // Old androidx.core marks the public Activity override restricted.
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() != KeyEvent.ACTION_DOWN && event.getAction() != KeyEvent.ACTION_UP) {
+            return super.dispatchKeyEvent(event);
+        }
+        VideoRemoteInput.Mode mode = !isVideoPlaying ? VideoRemoteInput.Mode.BROWSE
+                : videoControls != null && videoControls.isVisible()
+                ? VideoRemoteInput.Mode.CONTROLS : VideoRemoteInput.Mode.VIDEO;
+        // Accessibility/touch may move focus. Re-enter the row before letting directional keys through.
+        if (mode == VideoRemoteInput.Mode.CONTROLS && !videoControls.hasFocus()) videoControls.focus();
+        VideoRemoteInput.Action action = remoteInput.onKey(remoteKey(event.getKeyCode()),
+                event.getAction() == KeyEvent.ACTION_DOWN, event.getRepeatCount(), event.getEventTime(),
+                mode, loadState.current());
+        switch (action) {
+            case PASS: return super.dispatchKeyEvent(event);
+            case SEEK_BACK: seekVideo(-10000, false); break;
+            case SEEK_FORWARD: seekVideo(10000, false); break;
+            case SHOW_CONTROLS: showVideoControls(); break;
+            case HIDE_CONTROLS: hideVideoControls(); break;
+            case TOGGLE_PLAY: setVideoPlaying(null); break;
+            case PLAY: if (!infoVisible && currentVideoItem != null) setVideoPlaying(true); break;
+            case PAUSE: setVideoPlaying(false); break;
+            case PREVIOUS: if (!infoVisible) navigateManually(false); break;
+            case NEXT: if (!infoVisible) navigateManually(true); break;
+            case EXIT: finish(); break;
+            case PHOTO_SLIDESHOW:
+                if (!infoVisible && currentVideoItem == null && !slideshowActive) startSlideshow();
+                break;
+            default: break;
+        }
+        return true;
+    }
+
+    private static VideoRemoteInput.Key remoteKey(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT: return VideoRemoteInput.Key.LEFT;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: return VideoRemoteInput.Key.RIGHT;
+            case KeyEvent.KEYCODE_DPAD_UP: return VideoRemoteInput.Key.UP;
+            case KeyEvent.KEYCODE_DPAD_DOWN: return VideoRemoteInput.Key.DOWN;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER: return VideoRemoteInput.Key.CENTER;
+            case KeyEvent.KEYCODE_MENU: return VideoRemoteInput.Key.MENU;
+            case KeyEvent.KEYCODE_BACK: return VideoRemoteInput.Key.BACK;
+            case KeyEvent.KEYCODE_MEDIA_PLAY: return VideoRemoteInput.Key.PLAY;
+            case KeyEvent.KEYCODE_MEDIA_PAUSE: return VideoRemoteInput.Key.PAUSE;
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+            case KeyEvent.KEYCODE_SPACE: return VideoRemoteInput.Key.TOGGLE;
+            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD: return VideoRemoteInput.Key.FAST_FORWARD;
+            case KeyEvent.KEYCODE_MEDIA_REWIND: return VideoRemoteInput.Key.REWIND;
+            case KeyEvent.KEYCODE_MEDIA_NEXT: return VideoRemoteInput.Key.NEXT;
+            case KeyEvent.KEYCODE_MEDIA_PREVIOUS: return VideoRemoteInput.Key.PREVIOUS;
+            default: return VideoRemoteInput.Key.OTHER;
+        }
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) remoteInput.reset();
+    }
+
+    @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // Playback keys have already been handled in dispatchKeyEvent, ahead of focused children.
+        // Unhandled control-row directions must never fall through into photo navigation/zoom.
+        if (isVideoPlaying) return super.onKeyDown(keyCode, event);
         if (videoErrorMessage != null) {
             switch (keyCode) {
                 case KeyEvent.KEYCODE_DPAD_CENTER:
@@ -1051,19 +1339,8 @@ public class MediaDetailActivity extends FragmentActivity {
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 handleOkKey();
                 return true;
-            case KeyEvent.KEYCODE_MEDIA_PLAY:
-            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                if (player != null) {
-                    player.setPlayWhenReady(!player.getPlayWhenReady());
-                } else if (fallbackPlayer != null) {
-                    toggleFallbackPlayback();
-                }
-                return true;
             case KeyEvent.KEYCODE_INFO:
                 showInfoOverlay();
-                return true;
-            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
-                startSlideshow();
                 return true;
             case KeyEvent.KEYCODE_F1:
             case KeyEvent.KEYCODE_F2:
@@ -1073,22 +1350,8 @@ public class MediaDetailActivity extends FragmentActivity {
         return super.onKeyDown(keyCode, event);
     }
 
-    private void toggleFallbackPlayback() {
-        fallbackPlayback.toggle();
-        if (fallbackPlayer == null || !fallbackPlayback.isPrepared()) return;
-        if (fallbackPlayback.shouldPlay()) fallbackPlayer.start();
-        else fallbackPlayer.pause();
-    }
-
     private void handleOkKey() {
-        if (player != null && isVideoPlaying) {
-            boolean isPlaying = player.getPlayWhenReady();
-            player.setPlayWhenReady(!isPlaying);
-            String message = isPlaying ? "已暂停" : "继续播放";
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
-        } else if (fallbackPlayer != null && isVideoPlaying) {
-            toggleFallbackPlayback();
-        } else if (currentVideoItem != null && !isVideoPlaying) {
+        if (currentVideoItem != null && !isVideoPlaying) {
             startVideoPlayback(currentVideoItem);
         } else if (!isVideoPlaying) {
             toggleSlideshow();

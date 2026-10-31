@@ -7,6 +7,21 @@ import java.util.List;
 import static org.junit.Assert.*;
 
 public class MediaDetailLifecycleTest {
+    @Test public void dedicatedPlayAndPauseAreIdempotentEvenDuringPrepare() {
+        DetailPlaybackState state = new DetailPlaybackState();
+        state.setPlayWhenReady(false);
+        state.setPlayWhenReady(false);
+        assertFalse(state.isPlayRequested());
+        state.prepared();
+        assertFalse(state.shouldPlay());
+        state.setPlayWhenReady(true);
+        state.setPlayWhenReady(true);
+        assertTrue(state.shouldPlay());
+        state.reset();
+        assertFalse(state.isPrepared());
+        assertTrue(state.isPlayRequested());
+    }
+
     @Test public void transportKeyDuringPrepareOnlyRecordsIntent() {
         DetailPlaybackState state = new DetailPlaybackState();
         assertFalse(state.isPrepared());

@@ -84,6 +84,7 @@ See [API.md](API.md) for detailed authentication documentation.
 4. **Photo Viewing**: Click a date to view all photos from that day
 5. **Media Details**: Click a photo/video to view in full screen
 6. **Navigation**: Use LEFT/RIGHT keys to switch between photos in detail view
+   **Video playback**: LEFT/RIGHT seek 10 seconds; OK plays/pauses. UP/DOWN or MENU opens labelled controls, including Previous/Next media. Touch the picture to open the same controls. See [remote controls and test coverage](docs/video-remote-controls.md).
 7. **Back and Exit**: BACK closes the menu or returns to the previous level first; at the main browsing level, press BACK twice within two seconds to exit
 
 ## Architecture
