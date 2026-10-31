@@ -7,6 +7,8 @@ final class DetailPlaybackState {
     void reset() { prepared = false; playWhenReady = true; }
     void prepared() { prepared = true; }
     void toggle() { playWhenReady = !playWhenReady; }
+    void setPlayWhenReady(boolean play) { playWhenReady = play; }
+    boolean isPlayRequested() { return playWhenReady; }
     boolean isPrepared() { return prepared; }
     boolean shouldPlay() { return prepared && playWhenReady; }
 }

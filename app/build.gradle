@@ -93,4 +93,9 @@ dependencies {
     testImplementation 'org.json:json:20230227'
     androidTestImplementation 'androidx.test:runner:1.3.0'
     androidTestImplementation 'junit:junit:4.13.2'
+
+    // Platform instrumentation APIs moved out of android.jar in SDK 28. Keep them test-only.
+    androidTestCompileOnly files(
+            "${android.sdkDirectory}/platforms/${android.compileSdkVersion}/optional/android.test.base.jar",
+            "${android.sdkDirectory}/platforms/${android.compileSdkVersion}/optional/android.test.runner.jar")
 }

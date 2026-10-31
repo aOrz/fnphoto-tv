@@ -55,7 +55,7 @@
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
 | 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget` 及同名 Test |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |
-| 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPlaybackState`、`DetailSessionStore`；`MediaDetailLifecycleTest`、`player/*Test` |
+| 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPlaybackState`、`DetailSessionStore`；`VideoRemoteInput`、`VideoSeekState`、`VideoControls`；`MediaDetailLifecycleTest`、`player/*Test`，设备测试 `VideoRemoteInstrumentationTest` |
 | 图片生命周期 | `cache/CachedImageLoader`、`ImageRequestScope`、`ImageCacheManager`；`ImagePipelineTest` |
 | 共享 | `SharedAlbumSupport`、`player/SharedVideoStream`；`SharedAlbumSupportTest`、`test_shared_fixtures.py` |
 | 网络/鉴权 | `api/FnHttpApi`、`ApiInterceptor`、`FnWebSocketClient`、`RequestAuthentication`、`TokenRefreshGate`；`api/*Test` |
@@ -75,6 +75,7 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 | [test/README.md](../../test/README.md)、[QA_CHECKLIST.md](../../test/QA_CHECKLIST.md) | 合成数据命令与设备判定标准；清单不是已经执行的结果 |
 | [large-library-boundaries.md](../large-library-boundaries.md) | 当前有限窗口、扫描、目录历史和恢复边界 |
 | [large-library-api-contract.md](../large-library-api-contract.md) | 地点/日期合同的证据范围及边界 fixture |
+| [video-remote-controls.md](../video-remote-controls.md) | 视频方向键定位、显式切媒体、触屏、媒体键与设备验证方法 |
 | [shared-albums.md](../shared-albums.md) | 已实现的接收方共享浏览；来源是客户端交接/参考实现，真实 NAS 仍需联调 |
 | [remember-browse-type.md](../remember-browse-type.md) | 按账号记住成功浏览类型；共享已接入 |
 | [performance.md](../performance.md)、[functional-completion.md](../functional-completion.md) | 历史改动/验证报告，不能当当前功能全集或当前测试结果 |
