@@ -7,9 +7,11 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.os.Build;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.TextView;
 
@@ -350,6 +352,57 @@ public class EmptyStateDeviceTest {
         key(KeyEvent.KEYCODE_DPAD_DOWN);
         await(() -> results.hasFocus() && results.getFocusedChild() != null);
         screenshot("search-append-retry-content");
+    }
+
+    @Test public void searchExplicitKeyboardRetainsKeysThenBackRestoresRemoteBrowse() throws Exception {
+        assumeTrue("IME visibility diagnostic needs API21+", Build.VERSION.SDK_INT >= 21);
+        final SearchActivity search = startSearch();
+        final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        fixture.respond(SEARCH, 503, "{\"code\":503}");
+        ui(() -> { input.setText("synthetic-keyboard"); return null; });
+        await(() -> title(search).equals("搜索失败"));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        awaitImeShown(true);
+        screenshot("search-explicit-keyboard");
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        assertTrue("Visible keyboard owns Down, not the retry action", ui(input::hasFocus));
+        assertFalse(ui(() -> action(search).hasFocus()));
+        key(KeyEvent.KEYCODE_BACK);
+        awaitImeShown(false);
+        assertFalse("First Back hides the keyboard, not Search", ui(search::isFinishing));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
+        screenshot("search-keyboard-back-remote-retry");
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(input::hasFocus);
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        awaitImeShown(true);
+        // Exercise the IME action callback, not a fabricated Activity.onKeyDown event.
+        ui(() -> { input.onEditorAction(EditorInfo.IME_ACTION_SEARCH); return null; });
+        awaitImeShown(false);
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
+        screenshot("search-keyboard-action-remote-retry");
+        key(KeyEvent.KEYCODE_BACK);
+        await(search::isFinishing);
+    }
+
+    @android.annotation.TargetApi(21)
+    private void awaitImeShown(boolean expected) throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            // Dedicated emulator only. Inspect the system's visible IME state, not app booleans.
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    new ParcelFileDescriptor.AutoCloseInputStream(instrumentation.getUiAutomation()
+                            .executeShellCommand("dumpsys input_method"))))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.contains("mInputShown=" + expected)) return;
+                }
+            }
+            Thread.sleep(100);
+        }
+        fail("IME visibility did not become " + expected);
     }
 
     @Test public void folderPermissionFailureRetriesOriginalOffsetThenShowsEmpty() throws Exception {
