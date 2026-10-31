@@ -17,6 +17,7 @@ public class HttpClientProvider {
                 .writeTimeout(30, TimeUnit.SECONDS)
                 .addInterceptor(new MetadataResponseInterceptor())
                 .addInterceptor(new ApiInterceptor(context))
+                .addNetworkInterceptor(new CredentialRedirectInterceptor())
                 .build();
         }
         return client;

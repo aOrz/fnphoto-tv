@@ -8,6 +8,7 @@ An Android TV application for browsing photos and videos from FN NAS (fnOS) phot
 - **Timeline View**: Browse photos organized by date in a timeline format
 - **Folder View**: Navigate through managed folders
 - **Album View**: Browse user-created albums
+- **Shared Albums**: Browse albums shared to you, with paged photo/video viewing and retryable loading ([contract and limits](docs/shared-albums.md))
 - **Media Playback**: View photos and play videos with full-screen support
 - **Seamless Navigation**: Use TV remote to navigate between photos with left/right keys
 - **Fullscreen Experience**: Distraction-free viewing without system UI

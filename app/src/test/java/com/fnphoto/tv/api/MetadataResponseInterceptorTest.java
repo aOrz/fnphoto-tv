@@ -52,4 +52,9 @@ public class MetadataResponseInterceptorTest {
         assertFalse(MetadataResponseInterceptor.isMetadataPath("/p/api/v1/stream/s/5"));
         assertFalse(MetadataResponseInterceptor.isMetadataPath("/elsewhere/gallery/list"));
     }
+    @Test public void sharedAlbumDirectoryAndContentAreBoundedButStreamsAreNot() {
+        assertTrue(MetadataResponseInterceptor.isMetadataPath("/p/api/v1/album_grant/list_to_me"));
+        assertTrue(MetadataResponseInterceptor.isMetadataPath("/p/api/v1/album/normal/getList"));
+        assertFalse(MetadataResponseInterceptor.isMetadataPath("/p/api/v1/stream/v/10010"));
+    }
 }

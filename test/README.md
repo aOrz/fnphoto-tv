@@ -127,3 +127,29 @@ adb -s <serial> logcat -v threadtime > test/.generated/evidence/logcat.txt
 | `9bf8247d` | API29 TV 视频专项：404 持久提示、同页重试、真实帧推进、暂停/恢复、A/B 切换、坏文件错误、过期回调取消、退出释放；未重跑 API19 |
 
 历史 API19 镜像是 Android 4.4.2 普通 Android，不是 TV OS；视频专项使用无音频输出的软件模拟器，因此未听验音频。历史结果不替代当前 commit/APK 的检查表；未验证真实 NAS/电视、4K/HEVC/HDR、长时间稳定性、弱网全矩阵或真实硬件 FPS。
+
+## 6. “分享给我”合同与 UI 场景
+
+```bash
+python test/qa_server.py --profile shared --host 127.0.0.1 --port 5667 \
+  --state-dir test/.generated/shared-state \
+  --trace-file test/.generated/shared-requests.jsonl
+```
+
+以 `test/test` 登录 `http://10.0.2.2:5667`，选择“共享”。该 profile 保留本人普通图库，但另外创建合成拥有者 `Synthetic Other Owner` 分享的相册 `9001`（125 项，媒体 ID `10001..10125`、113 张照片/12 个视频）和 `9002`（空相册）。这些媒体不会混入本人相册/图库；视频播放需先生成上述 `clip_a.mp4`。共享内容故意不提供 `additional.thumbnail`，以覆盖文档的 UUID 缩略图 `/s/` 和查看图 `/m/` 路径。
+
+接口仅按交接文档模拟：共享列表使用 `sort_by=share_mod_time`、`sort_direction=desc`；内容使用驼峰 `albumId/startTime/endTime/sortDirection`，固定时间文本为 `2000:01:01 00:00:00` 至 `2099:12:31 23:59:59`。错误参数会返回 HTTP 400，避免客户端误用普通相册接口时得到假成功。125 项的预期页为 `offset=0/50/100`、数量 `50/50/25`，末页 `hasNext=false`。该 fixture 的 `count` 表示本页数量，**并未确认真实 NAS 的 count 语义**。
+
+服务运行时可本地切换，无 HTTP 控制入口：
+
+```bash
+python test/qa_server.py shared-control --state-dir test/.generated/shared-state --mode page-failure
+# 保留已加载页；滚至末尾，观察失败提示。恢复后按确定应重试相同 offset。
+python test/qa_server.py shared-control --state-dir test/.generated/shared-state --mode normal
+# 延迟共享响应，期间切换到其他栏目，旧响应不能覆盖新页面。
+python test/qa_server.py shared-control --state-dir test/.generated/shared-state --mode normal --delay-ms 2500
+```
+
+其他模式：`empty` 返回空共享目录；`list-failure` 返回列表 HTTP 503；`revoked` 返回内容 HTTP 403。`page-failure` 仅令内容 offset >= 50 返回 503。以上状态和错误码均是**测试注入，不是已确认 NAS 的权限撤销/错误合同**。每轮结束用 `--mode normal` 重置（同时将 delay 清零）。列表和内容请求在收到时读入状态并等待延迟，因此能够重现旧响应晚到的顺序。
+
+自动测试：`python -m unittest discover -s test -p 'test_shared_fixtures.py' -v`。覆盖参数大小写/范围、独立共享目录、三页内容、空态、真实 JPEG、失败/重试、撤权以及延迟响应顺序；Android 页面、焦点和播放器需另行实际操作验证，不能由 fixture 单测推断通过。

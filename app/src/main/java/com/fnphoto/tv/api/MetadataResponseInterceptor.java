@@ -26,7 +26,7 @@ public final class MetadataResponseInterceptor implements Interceptor {
     static boolean isMetadataPath(String path) {
         // Do not apply a JSON budget to photo/video byte streams or third-party downloads.
         return path.startsWith("/p/api/") && (path.contains("/gallery/")
-                || path.contains("/album/") || path.contains("/ai-person/")
+                || path.contains("/album/") || path.contains("/album_grant/") || path.contains("/ai-person/")
                 || path.contains("/folder_view/") || path.endsWith("/explore/geos")
                 || path.endsWith("/search/results") || path.endsWith("/photo/search")
                 || path.endsWith("/photo/folder/list"));

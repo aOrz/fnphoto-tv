@@ -4,7 +4,7 @@ package com.fnphoto.tv;
 enum BrowseMode {
     GALLERY("gallery", "图库"), FOLDERS("folders", "文件夹"),
     FAVORITES("favorites", "收藏"), RECENT("recent", "最近添加"),
-    ALBUMS("albums", "相册"), PEOPLE("people", "人物"), PLACES("places", "地点"),
+    ALBUMS("albums", "相册"), SHARED("shared", "共享"), PEOPLE("people", "人物"), PLACES("places", "地点"),
     PHOTOS("photo", "照片"), VIDEOS("video", "视频");
 
     final String id;
@@ -15,6 +15,6 @@ enum BrowseMode {
 
     static BrowseMode fromId(String id) {
         for (BrowseMode mode : values()) if (mode.id.equals(id)) return mode;
-        return null; // shared/tags/smart/search/settings are deliberately not destinations.
+        return null; // tags/smart/search/settings are deliberately not destinations.
     }
 }

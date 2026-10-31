@@ -358,7 +358,6 @@ public class MainActivity extends FragmentActivity {
             case "map":
             case "tags":
             case "smart":
-            case "shared":
                 new android.app.AlertDialog.Builder(this)
                     .setTitle(item.getTitle())
                     .setMessage("此功能尚未接入：当前缺少可验证的飞牛相册接口协议。需要对应 NAS 版本的接口文档或脱敏请求/响应样本，不能将其他列表冒充为此功能。")

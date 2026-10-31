@@ -48,7 +48,7 @@ public class BrowseSelectionTest {
         store.put(key(), "favorites");
         BrowseSelection selection = selection();
         assertEquals(BrowseMode.FAVORITES, selection.initial());
-        for (String action : new String[]{"shared", "tags", "smart", "map", "search", "settings", "logout", "media_types", "unknown"}) {
+        for (String action : new String[]{"tags", "smart", "map", "search", "settings", "logout", "media_types", "unknown"}) {
             assertFalse(selection.select(action));
             assertEquals("favorites", store.get(key()));
         }
@@ -58,7 +58,7 @@ public class BrowseSelectionTest {
     }
 
     @Test public void unknownOrNoLongerImplementedStoredTypesFallBackAndAreRemoved() {
-        for (String invalid : new String[]{"shared", "tags", "future_type", "media_types", "图库", "3"}) {
+        for (String invalid : new String[]{"tags", "future_type", "media_types", "图库", "3"}) {
             store.put(key(), invalid);
             assertEquals(BrowseMode.GALLERY, selection().initial());
             assertNull(store.get(key()));
@@ -167,4 +167,58 @@ public class BrowseSelectionTest {
         assertEquals("media_types", BrowseMode.VIDEOS.menuAction());
         assertNotEquals(BrowseMode.PHOTOS.id, BrowseMode.VIDEOS.id);
     }
+
+    @Test public void sharedDirectoryIsRememberedOnlyAfterItsSuccessfulResponse() {
+        store.put(key(), "albums");
+        BrowseSelection selection = selection();
+        selection.initial();
+        assertEquals(BrowseMode.SHARED, BrowseMode.fromId("shared"));
+        assertEquals("shared", BrowseMode.SHARED.menuAction());
+        assertTrue(selection.select("shared"));
+        assertEquals("albums", store.get(key()));
+        assertNull(selection.failed(BrowseMode.SHARED));
+        assertEquals("albums", store.get(key()));
+        // A validated empty directory invokes the same success callback as a populated directory.
+        selection.succeeded(BrowseMode.SHARED, account);
+        assertEquals("shared", store.get(key()));
+        assertEquals(BrowseMode.SHARED, selection().initial());
+    }
+
+    @Test public void sharedRestoreFailureFallsBackWithoutErasingPreference() {
+        store.put(key(), "shared");
+        BrowseSelection selection = selection();
+        assertEquals(BrowseMode.SHARED, selection.initial());
+        assertEquals(BrowseMode.GALLERY, selection.failed(BrowseMode.SHARED));
+        selection.succeeded(BrowseMode.GALLERY, account);
+        assertEquals("shared", store.get(key()));
+        assertEquals(BrowseMode.SHARED, selection().initial());
+    }
+
+    @Test public void lateSharedResponseDoesNotOverrideNewerSelectionOrLogout() {
+        BrowseSelection selection = selection();
+        selection.initial();
+        selection.select("shared");
+        selection.select("people");
+        selection.succeeded(BrowseMode.SHARED, account);
+        assertTrue(store.data.isEmpty());
+        selection.succeeded(BrowseMode.PEOPLE, account);
+        assertEquals("people", store.get(key()));
+        selection.select("shared");
+        selection.logout();
+        selection.succeeded(BrowseMode.SHARED, account);
+        assertNull(store.get(key()));
+    }
+
+    @Test public void sharedPreferenceIsIsolatedFromOtherAccountAndUnsupportedDialogs() {
+        store.put(key(), "shared");
+        BrowseSelection selection = selection();
+        selection.initial();
+        for (String action : new String[]{"tags", "smart", "media_types", "search", "settings"}) {
+            assertFalse(selection.select(action));
+        }
+        assertEquals("shared", store.get(key()));
+        String bob = BrowseSelection.accountId("nas.example:5666", "bob");
+        assertEquals(BrowseMode.GALLERY, new BrowseSelection(store, bob).initial());
+    }
+
 }

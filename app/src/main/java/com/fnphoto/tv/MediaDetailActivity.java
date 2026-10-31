@@ -2,6 +2,7 @@ package com.fnphoto.tv;
 
 import android.animation.ObjectAnimator;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Matrix;
@@ -33,6 +34,7 @@ import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.api.HttpClientProvider;
 import com.fnphoto.tv.cache.CachedImageLoader;
 import com.fnphoto.tv.player.AuthenticatedHttpDataSourceFactory;
+import com.fnphoto.tv.player.SharedAlbumHttpDataSourceFactory;
 import com.fnphoto.tv.player.VideoLoadErrorPolicy;
 import com.fnphoto.tv.player.VideoPlaybackFailure;
 import com.google.android.exoplayer2.Player;
@@ -385,8 +387,10 @@ public class MediaDetailActivity extends FragmentActivity {
             player = new SimpleExoPlayer.Builder(this).build();
             playerView.setPlayer(player);
 
-            AuthenticatedHttpDataSourceFactory dataSourceFactory =
-                    new AuthenticatedHttpDataSourceFactory(this, "ExoPlayer");
+            com.google.android.exoplayer2.upstream.DataSource.Factory dataSourceFactory =
+                    getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)
+                            ? new SharedAlbumHttpDataSourceFactory(this, "ExoPlayer")
+                            : new AuthenticatedHttpDataSourceFactory(this, "ExoPlayer");
 
             final SimpleExoPlayer requestedPlayer = player;
             final long generation = loadState.next();
@@ -448,6 +452,12 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void setupMediaPlayer(String videoUrl) {
+        // Platform MediaPlayer does not expose per-hop redirect/header policy. Never bypass the
+        // protected OkHttp transport for received media, even after a decoder/format failure.
+        if (getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)) {
+            showVideoError("当前设备无法播放此共享视频，请重试或切换其他媒体");
+            return;
+        }
         try {
             android.view.SurfaceView sv = new android.view.SurfaceView(this);
             sv.setLayoutParams(new FrameLayout.LayoutParams(
@@ -650,6 +660,16 @@ public class MediaDetailActivity extends FragmentActivity {
         } else {
             finishNavigation();
         }
+    }
+
+    @Override public void finish() {
+        if (getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)
+                && mediaList != null && currentIndex >= 0 && currentIndex < mediaList.size()) {
+            Intent result = new Intent();
+            result.putExtra("LAST_MEDIA_ID", mediaList.get(currentIndex).getId());
+            setResult(RESULT_OK, result);
+        }
+        super.finish();
     }
 
     private void finishNavigation() {
@@ -890,6 +910,10 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void toggleCollect() {
+        if (getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)) {
+            Toast.makeText(this, "共享相册暂不支持收藏操作", Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (collectPending || api == null || mediaList == null || mediaList.isEmpty()) return;
         final MediaItem item = mediaList.get(currentIndex);
         final int photoId;
