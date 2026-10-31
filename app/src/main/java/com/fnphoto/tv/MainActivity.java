@@ -39,6 +39,11 @@ public class MainActivity extends FragmentActivity {
     private String token;
     private String secret;
     private String baseUrl;
+    private SharedPreferences prefs;
+    private BrowseSelection browseSelection;
+    private BrowseMode currentBrowseMode = BrowseMode.GALLERY;
+    private BrowseMode initialBrowseMode;
+    private boolean initialBrowseStarted;
     
     // 双击返回键退出相关
     private boolean isBackPressedOnce = false;
@@ -129,10 +134,28 @@ public class MainActivity extends FragmentActivity {
         
         setContentView(R.layout.activity_main);
 
-        SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
+        prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         baseUrl = prefs.getString("nas_url", "");
         token = prefs.getString("api_token", "");
         secret = prefs.getString("secret", "");
+
+        String account = prefs.getString(BrowseSelection.ACCOUNT_KEY, "");
+        if (account.isEmpty()) {
+            // Upgrade existing remembered sessions without binding preferences to a rotating token.
+            String source = com.fnphoto.tv.api.RememberedNasTarget.source(
+                    prefs.getString("saved_source", ""), prefs.getString("saved_url", ""));
+            account = BrowseSelection.accountId(source, prefs.getString("saved_user", ""));
+            if (!account.isEmpty()) prefs.edit().putString(BrowseSelection.ACCOUNT_KEY, account).apply();
+        }
+        browseSelection = new BrowseSelection(new BrowseSelection.Store() {
+            @Override public String get(String key) {
+                try { return prefs.getString(key, ""); }
+                catch (ClassCastException invalidPreference) { prefs.edit().remove(key).apply(); return ""; }
+            }
+            @Override public void put(String key, String value) { prefs.edit().putString(key, value).apply(); }
+            @Override public void remove(String key) { prefs.edit().remove(key).apply(); }
+        }, account);
+        initialBrowseMode = browseSelection.initial();
 
         // 初始化侧滑菜单
         setupSideMenu();
@@ -140,8 +163,7 @@ public class MainActivity extends FragmentActivity {
         // 添加 MainFragment
         setupMainFragment();
 
-        // 设置初始模式
-        setModeText("图库");
+        setModeText(initialBrowseMode.title);
 
         // 初始化 API 并获取相册应用版本
         initApiAndGetVersion();
@@ -178,6 +200,14 @@ public class MainActivity extends FragmentActivity {
         // 第四组：退出登录
         menuAdapter.add(new MenuItem("退出登录", "logout"));
 
+        drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+            @Override public void onDrawerClosed(View drawerView) {
+                MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                        .findFragmentById(R.id.main_content_container);
+                if (fragment != null) fragment.focusBrowseContent();
+            }
+        });
+
         menuGrid.setAdapter(menuAdapter);
         menuGrid.setWindowAlignment(VerticalGridView.WINDOW_ALIGN_HIGH_EDGE);
         menuGrid.setWindowAlignmentOffset(48);
@@ -186,14 +216,15 @@ public class MainActivity extends FragmentActivity {
         // 顶栏「浏览」按钮打开导航面板
         View menuButton = findViewById(R.id.btn_menu);
         if (menuButton != null) {
-            menuButton.setOnClickListener(v -> {
-                drawerLayout.openDrawer(GravityCompat.END);
-                menuGrid.requestFocus();
-            });
+            menuButton.setFocusable(true);
+            menuButton.setOnClickListener(v -> openBrowseMenu());
         }
     }
 
     private void setupMainFragment() {
+        // FragmentManager has already recreated this instance after process/configuration recreation.
+        // Replacing it here would cancel its startup load and leave the replacement uninitialized.
+        if (getSupportFragmentManager().findFragmentById(R.id.main_content_container) != null) return;
         MainFragment fragment = new MainFragment();
         Bundle args = new Bundle();
         args.putString("nas_url", baseUrl);
@@ -204,6 +235,77 @@ public class MainActivity extends FragmentActivity {
         getSupportFragmentManager().beginTransaction()
                 .replace(R.id.main_content_container, fragment)
                 .commit();
+    }
+
+    private void openBrowseMenu() {
+        for (int i = 0; i < menuAdapter.getItemCount(); i++) {
+            if (currentBrowseMode.menuAction().equals(menuAdapter.get(i).getAction())) {
+                menuGrid.setSelectedPosition(i);
+                break;
+            }
+        }
+        drawerLayout.openDrawer(GravityCompat.END);
+        menuGrid.requestFocus();
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.main_content_container);
+        if (fragment != null) startInitialBrowse(fragment);
+    }
+
+    private void startInitialBrowse(MainFragment fragment) {
+        if (initialBrowseStarted || browseSelection == null || isFinishing()) return;
+        if (getSupportFragmentManager().findFragmentById(R.id.main_content_container) != fragment) return;
+        initialBrowseStarted = true;
+        fragment.loadBrowseMode(initialBrowseMode);
+    }
+
+    void retryBrowseMode(BrowseMode mode) { selectBrowseMode(mode); }
+
+    private void selectBrowseMode(BrowseMode mode) {
+        MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.main_content_container);
+        if (fragment != null && browseSelection.select(mode.id)) fragment.loadBrowseMode(mode);
+    }
+
+    void onBrowseModeStarted(BrowseMode mode) {
+        currentBrowseMode = mode;
+        setModeText(mode.title);
+    }
+
+    void onBrowseModeLoaded(BrowseMode mode) {
+        if (isFinishing() || mode != currentBrowseMode) return;
+        browseSelection.succeeded(mode, prefs.getString(BrowseSelection.ACCOUNT_KEY, ""));
+    }
+
+    void onBrowseModeFailed(BrowseMode mode) {
+        if (isFinishing()) return;
+        BrowseMode fallback = browseSelection.failed(mode);
+        if (fallback != null) {
+            Toast.makeText(this, "上次浏览类型暂不可用，已返回图库；保留原选择供下次重试", Toast.LENGTH_LONG).show();
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.loadBrowseMode(fallback);
+        }
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && drawerLayout != null && getCurrentFocus() == null) {
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.focusBrowseContent();
+        }
+    }
+
+    boolean canFocusBrowseContent() {
+        return !isFinishing() && hasWindowFocus() && !drawerLayout.isDrawerOpen(GravityCompat.END);
+    }
+
+    void focusBrowseMenuButton() {
+        if (canFocusBrowseContent()) findViewById(R.id.btn_menu).requestFocus();
     }
 
     private void setModeText(String mode) {
@@ -229,36 +331,13 @@ public class MainActivity extends FragmentActivity {
 
     private void handleMenuSelection(MenuItem item) {
         Log.d(TAG, "Menu selected: " + item.getAction());
-        // Unsupported actions and cancelled dialogs must not relabel the old content.
-        if (!"shared".equals(item.getAction()) && !"tags".equals(item.getAction())
-                && !"smart".equals(item.getAction()) && !"map".equals(item.getAction())
-                && !"media_types".equals(item.getAction()) && !"search".equals(item.getAction())
-                && !"settings".equals(item.getAction()) && !"logout".equals(item.getAction())) {
-            setModeText(item.getTitle());
+        BrowseMode mode = BrowseMode.fromId(item.getAction());
+        if (mode != null) {
+            drawerLayout.closeDrawer(GravityCompat.END);
+            selectBrowseMode(mode);
+            return;
         }
-        
         switch (item.getAction()) {
-            case "gallery":
-                loadTimelinePhotos();
-                break;
-            case "folders":
-                loadFolders();
-                break;
-            case "albums":
-                loadAlbums();
-                break;
-            case "favorites":
-                loadFavorites();
-                break;
-            case "recent":
-                loadRecent();
-                break;
-            case "places":
-                loadPlaces();
-                break;
-            case "people":
-                loadPeople();
-                break;
             case "search":
                 openSearch();
                 return;
@@ -273,12 +352,7 @@ public class MainActivity extends FragmentActivity {
                 new android.app.AlertDialog.Builder(this)
                     .setTitle("媒体类型")
                     .setItems(new String[]{"照片", "视频"}, (dialog, which) -> {
-                        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                            .findFragmentById(R.id.main_content_container);
-                        if (fragment != null) {
-                            setModeText(which == 0 ? "照片" : "视频");
-                            fragment.loadMediaType(which == 0 ? "photo" : "video");
-                        }
+                        selectBrowseMode(which == 0 ? BrowseMode.PHOTOS : BrowseMode.VIDEOS);
                     }).setNegativeButton("取消", null).show();
                 return;
             case "map":
@@ -309,10 +383,12 @@ public class MainActivity extends FragmentActivity {
     }
     
     private void logout() {
+        browseSelection.logout();
         com.fnphoto.tv.api.FnWebSocketClient.closeAuthenticatedSession();
         // 清除所有登录信息
         SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         prefs.edit()
+            .remove(BrowseSelection.ACCOUNT_KEY)
             .remove("nas_url")
             .remove("login_session")
             .remove("api_token")
@@ -341,8 +417,7 @@ public class MainActivity extends FragmentActivity {
             if (drawerLayout.isDrawerOpen(GravityCompat.END)) {
                 drawerLayout.closeDrawer(GravityCompat.END);
             } else {
-                drawerLayout.openDrawer(GravityCompat.END);
-                menuGrid.requestFocus();
+                openBrowseMenu();
             }
             return true;
         } else if (keyCode == KeyEvent.KEYCODE_BACK) {
@@ -405,9 +480,8 @@ public class MainActivity extends FragmentActivity {
                         Log.i(TAG, "相册应用版本信息:");
                         Log.i(TAG, "  版本号: " + result.data.version);
                         Log.i(TAG, "========================================");
-                        // 获取版本成功后，获取相册统计信息和加载照片
+                        // Optional metadata must never trigger or replace the chosen browse screen.
                         getPhotoStats();
-                        loadTimelinePhotos();
                     } else {
                         Log.w(TAG, "获取版本失败: errno=" + result.errno + ", result=" + result.result);
                     }
@@ -462,60 +536,8 @@ public class MainActivity extends FragmentActivity {
         });
     }
 
-    private void loadTimelinePhotos() {
-        // 通过 MainFragment 加载时间线照片
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadTimeline();
-        }
-    }
-
-    private void loadFolders() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadFolders();
-        }
-    }
-
-    private void loadAlbums() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadAlbums();
-        }
-    }
-
-    private void loadFavorites() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadFavorites();
-        }
-    }
-
-    private void loadRecent() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadRecent();
-        }
-    }
-
-    private void loadPlaces() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadPlaces();
-        }
-    }
-
-    private void loadPeople() {
-        MainFragment fragment = (MainFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.main_content_container);
-        if (fragment != null) {
-            fragment.loadPeople();
-        }
+    @Override protected void onDestroy() {
+        backHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 }

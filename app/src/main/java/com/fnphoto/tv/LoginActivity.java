@@ -232,7 +232,8 @@ public class LoginActivity extends FragmentActivity {
                 saveUrl = "http://" + saveUrl;
             }
 
-            editor.putString("login_session", java.util.UUID.randomUUID().toString())
+            editor.putString(BrowseSelection.ACCOUNT_KEY, BrowseSelection.accountId(source, user))
+                .putString("login_session", java.util.UUID.randomUUID().toString())
                 .putString("nas_url", saveUrl)
                 .putString("api_token", response.getString("token"))
                 .putString("secret", response.getString("secret"))
