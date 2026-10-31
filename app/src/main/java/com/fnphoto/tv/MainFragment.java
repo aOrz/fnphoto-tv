@@ -44,6 +44,7 @@ public class MainFragment extends BrowseSupportFragment {
     private static final String TAG = "MainFragment";
     private BrowseMode rootBrowseMode = BrowseMode.GALLERY;
     private boolean rootBrowseLoaded;
+    private static final int SHARED_DETAIL_REQUEST = 210;
     private static final int PREVIEW_LOAD_DELAY = 300; // 延迟加载时间
     private static final int VISIBLE_RANGE_BUFFER = 6; // 可视范围前后的缓冲数量
 
@@ -73,6 +74,9 @@ public class MainFragment extends BrowseSupportFragment {
     private boolean applyingPage;
     private int lastFilteredAutoIndex;
     private boolean albumDirectory;
+    private MainPagingState sharedAlbumPaging;
+    private boolean sharedAlbumDirectory;
+    private List<FnHttpApi.SharedAlbum> savedSharedAlbumList;
     private int savedAlbumSelection = -1;
     private String photoMode;
     private String photoDate;
@@ -166,6 +170,7 @@ public class MainFragment extends BrowseSupportFragment {
             case FAVORITES: loadFavorites(); break;
             case RECENT: loadRecent(); break;
             case ALBUMS: loadAlbums(); break;
+            case SHARED: loadSharedAlbums(); break;
             case PEOPLE: loadPeople(); break;
             case PLACES: loadPlaces(); break;
             case PHOTOS: loadMediaType("photo"); break;
@@ -273,6 +278,7 @@ public class MainFragment extends BrowseSupportFragment {
         previewScreen = 0;
         if (photoPaging != null) photoPaging.cancel();
         if (albumPaging != null) albumPaging.cancel();
+        if (sharedAlbumPaging != null) sharedAlbumPaging.cancel();
         photoPaging = null;
         photoScan.reset();
         applyingPage = false;
@@ -283,6 +289,7 @@ public class MainFragment extends BrowseSupportFragment {
         currentMediaList = null;
         photoPositions.clear();
         albumDirectory = false;
+        sharedAlbumDirectory = false;
         pagedLastRow = null;
         pageFooter = null;
         pageFooterAdapter = null;
@@ -305,6 +312,8 @@ public class MainFragment extends BrowseSupportFragment {
         timelineItems = null;
         currentMediaList = null;
         albumPaging = null;
+        sharedAlbumPaging = null;
+        savedSharedAlbumList = null;
         photoPositions.clear();
         albumPositions.clear();
         allDateItems.clear();
@@ -381,6 +390,9 @@ public class MainFragment extends BrowseSupportFragment {
                         } else if (albumDirectory) {
                             if (isWindowFull(albumPaging, savedAlbumList.size())) nextAlbumWindow();
                             else loadAlbumPage();
+                        } else if (sharedAlbumDirectory) {
+                            if (isWindowFull(sharedAlbumPaging, savedSharedAlbumList.size())) nextSharedAlbumWindow();
+                            else loadSharedAlbumPage();
                         }
                     } else if ("date".equals(mediaItem.getType())) {
                         loadPhotosByDate(mediaItem.getDateStr(), mediaItem.getPhotoCount());
@@ -388,6 +400,8 @@ public class MainFragment extends BrowseSupportFragment {
                         loadPersonPhotosByDate(mediaItem.getDateStr(), mediaItem.getPhotoCount());
                     } else if ("folder".equals(mediaItem.getType())) {
                         openFolderBrowse(mediaItem);
+                    } else if ("shared_album".equals(mediaItem.getType())) {
+                        loadPhotosBySharedAlbum(mediaItem.getId(), mediaItem.getTitle());
                     } else if ("album".equals(mediaItem.getType())) {
                         loadPhotosByAlbum(mediaItem.getId(), mediaItem.getTitle());
                     } else if ("place".equals(mediaItem.getType())) {
@@ -417,6 +431,10 @@ public class MainFragment extends BrowseSupportFragment {
                             if (isFilteredPhotoMode()) lastFilteredAutoIndex = index;
                             loadPhotoPage();
                         }
+                    } else if (sharedAlbumDirectory && "shared_album".equals(mi.getType())) {
+                        Integer index = albumPositions.get(mi.getId());
+                        if (index != null && index >= savedSharedAlbumList.size() - PREFETCH_DISTANCE
+                                && !sharedAlbumPaging.hasFailed() && !applyingPage) loadSharedAlbumPage();
                     } else if (albumDirectory && "album".equals(mi.getType())) {
                         Integer index = albumPositions.get(mi.getId());
                         if (index != null && index >= savedAlbumList.size() - PREFETCH_DISTANCE
@@ -507,6 +525,8 @@ public class MainFragment extends BrowseSupportFragment {
                 // Reusing the old aggregate would leave a stale count/empty date card.
                 if (favoritesTimeline) loadFavorites(true);
                 else displayTimeline(timelineItems);
+            } else if (savedSharedAlbumList != null) {
+                displaySharedAlbums();
             } else if (savedAlbumList != null) {
                 Log.d(TAG, "Returning to album list");
                 displayAlbums(savedAlbumList);
@@ -863,6 +883,111 @@ public class MainFragment extends BrowseSupportFragment {
         });
     }
 
+    public void loadSharedAlbums() {
+        if (api == null || token == null || token.isEmpty()) return;
+        beginRootScreen(BrowseMode.SHARED);
+        sharedAlbumPaging = new MainPagingState(SharedAlbumSupport.ALBUM_PAGE_SIZE);
+        savedSharedAlbumList = new ArrayList<>();
+        displaySharedAlbums();
+        loadSharedAlbumPage();
+    }
+
+    private void displaySharedAlbums() {
+        sharedAlbumDirectory = true;
+        isPhotoListView = false;
+        timelineItems = null;
+        pagedTitle = "分享给我";
+        mRowsAdapter.clear();
+        pagedLastRow = null;
+        pageFooter = null;
+        pageFooterAdapter = null;
+        albumPositions.clear();
+        for (int i = 0; i < savedSharedAlbumList.size(); i++) appendSharedAlbumCard(savedSharedAlbumList.get(i), i);
+        updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+        if (savedAlbumSelection >= 0 && savedAlbumSelection < savedSharedAlbumList.size()) {
+            final int position = savedAlbumSelection;
+            positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
+        }
+    }
+
+    private void appendSharedAlbumCard(FnHttpApi.SharedAlbum album, int position) {
+        MediaItem item = SharedAlbumSupport.albumCard(baseUrl, album);
+        albumPositions.put(item.getId(), position);
+        appendPagedCard(item, position);
+    }
+
+    private void loadSharedAlbumPage() {
+        if (!sharedAlbumDirectory || sharedAlbumPaging == null || applyingPage) return;
+        if (isWindowFull(sharedAlbumPaging, savedSharedAlbumList.size())) {
+            updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+            return;
+        }
+        final int offset = sharedAlbumPaging.begin();
+        if (offset < 0) {
+            updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+            return;
+        }
+        albumFailureMessage = null;
+        updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+        String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.LIST_PATH, "GET",
+                SharedAlbumSupport.listQuery(offset));
+        enqueue(api.getSharedAlbums(token, authx, offset, SharedAlbumSupport.ALBUM_PAGE_SIZE,
+                "share_mod_time", "desc"), new Callback<FnHttpApi.SharedAlbumListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.SharedAlbumListResponse> call,
+                    Response<FnHttpApi.SharedAlbumListResponse> response) {
+                FnHttpApi.SharedAlbumListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || !validPage(result.data.list, SharedAlbumSupport.ALBUM_PAGE_SIZE)) {
+                    sharedAlbumPaging.fail();
+                } else {
+                    List<String> ids = new ArrayList<>();
+                    for (FnHttpApi.SharedAlbum album : result.data.list) {
+                        ids.add(album == null || album.albumId <= 0 ? null : String.valueOf(album.albumId));
+                    }
+                    Boolean hasMore = SharedAlbumSupport.hasMoreAlbums(result.data.total, offset, ids.size());
+                    applyingPage = true;
+                    for (int index : sharedAlbumPaging.accept(ids, hasMore)) {
+                        FnHttpApi.SharedAlbum album = result.data.list.get(index);
+                        if (albumPositions.containsKey(String.valueOf(album.albumId))) continue;
+                        int position = savedSharedAlbumList.size();
+                        savedSharedAlbumList.add(album);
+                        appendSharedAlbumCard(album, position);
+                    }
+                    applyingPage = false;
+                }
+                updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+                if (offset == 0) {
+                    if (sharedAlbumPaging.hasFailed() || sharedAlbumPaging.isStalled()) {
+                        rootRequestFailed();
+                        return;
+                    }
+                    rootLoadSucceeded();
+                }
+                if (offset == 0 && !savedSharedAlbumList.isEmpty()) {
+                    positionHandler.post(() -> setSelectedPosition(0));
+                }
+            }
+            @Override public void onFailure(Call<FnHttpApi.SharedAlbumListResponse> call, Throwable error) {
+                sharedAlbumPaging.fail();
+                albumFailureMessage = metadataFailureMessage(error);
+                updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
+                if (offset == 0) rootRequestFailed();
+            }
+        });
+    }
+
+    private void loadPhotosBySharedAlbum(String albumId, String albumName) {
+        if (api == null || token == null || token.isEmpty()) return;
+        final int id;
+        try { id = Integer.parseInt(albumId); } catch (NumberFormatException error) { return; }
+        Integer selection = albumPositions.get(albumId);
+        savedAlbumSelection = selection == null ? -1 : selection;
+        beginScreen();
+        timelineItems = null;
+        photoAlbumId = id;
+        startPhotoPaging("shared_album", "共享 · " + albumName);
+    }
+
     private void loadDatePreviewThumbnails(final MediaItem mediaItem, 
                                            final FnHttpApi.TimelineItem timelineItem,
                                            final Runnable onComplete) {
@@ -959,7 +1084,9 @@ public class MainFragment extends BrowseSupportFragment {
                     return;
                 }
                 List<String> ids = new ArrayList<>();
-                for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
+                for (FnHttpApi.GalleryPhoto photo : result.data.list) {
+                    ids.add(photo == null || photo.id <= 0 ? null : String.valueOf(photo.id));
+                }
                 for (int index : paging.accept(ids, result.data.hasNext)) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
                     if (!PhotoSelection.includes(true, photo.isCollect) || photo.additional == null
@@ -1307,7 +1434,8 @@ public class MainFragment extends BrowseSupportFragment {
     private void startPhotoPaging(String mode, String title) {
         photoMode = mode;
         pagedTitle = title;
-        photoPaging = new MainPagingState(PHOTO_PAGE_SIZE);
+        photoPaging = new MainPagingState("shared_album".equals(mode)
+                ? SharedAlbumSupport.MEDIA_PAGE_SIZE : PHOTO_PAGE_SIZE);
         currentMediaList = new ArrayList<>();
         photoPositions.clear();
         isPhotoListView = true;
@@ -1340,7 +1468,12 @@ public class MainFragment extends BrowseSupportFragment {
         photoFailureMessage = null;
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
-        if ("album".equals(photoMode)) {
+        if ("shared_album".equals(photoMode)) {
+            String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.CONTENT_PATH, "GET",
+                    SharedAlbumSupport.contentQuery(photoAlbumId, offset));
+            request = api.getSharedAlbumPhotos(token, authx, photoAlbumId, SharedAlbumSupport.START_TIME,
+                    SharedAlbumSupport.END_TIME, offset, SharedAlbumSupport.MEDIA_PAGE_SIZE, "desc");
+        } else if ("album".equals(photoMode)) {
             String params = "album_id=" + photoAlbumId + "&sort_by=date_time&sort_direction=desc&offset="
                     + offset + "&limit=" + PHOTO_PAGE_SIZE;
             String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/photos", "GET", params);
@@ -1368,7 +1501,7 @@ public class MainFragment extends BrowseSupportFragment {
                     Response<FnHttpApi.GalleryListResponse> response) {
                 FnHttpApi.GalleryListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
-                        || result.data == null || !validPage(result.data.list, PHOTO_PAGE_SIZE)) {
+                        || result.data == null || !validPage(result.data.list, photoPaging.getPageSize())) {
                     photoPaging.fail();
                     finishPhotoPage(false);
                     if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
@@ -1376,24 +1509,32 @@ public class MainFragment extends BrowseSupportFragment {
                 }
                 int previousCount = currentMediaList.size();
                 List<String> ids = new ArrayList<>();
-                for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
+                for (FnHttpApi.GalleryPhoto photo : result.data.list) {
+                    ids.add(photo == null || photo.id <= 0 ? null : String.valueOf(photo.id));
+                }
                 applyingPage = true;
                 for (int index : photoPaging.accept(ids, result.data.hasNext)) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
                     if (photoPositions.containsKey(String.valueOf(photo.id))) continue;
                     if (!PhotoSelection.includes("favorites".equals(photoMode), photo.isCollect)
                             || !PhotoSelection.matchesCategory("media_type".equals(photoMode) ? photoCategory : null, photo.category)) continue;
-                    FnHttpApi.GalleryThumbnail thumb = photo.additional != null ? photo.additional.thumbnail : null;
-                    String thumbUrl = thumb == null ? null : absoluteUrl(thumb.mUrl != null ? thumb.mUrl : thumb.sUrl);
-                    String mediaUrl = thumb == null ? null : absoluteUrl(thumb.originalUrl);
-                    if ("video".equals(photo.category)) {
-                        mediaUrl = thumb != null && thumb.videoUrl != null ? absoluteUrl(thumb.videoUrl)
-                                : baseUrl + "/p/api/v1/stream/v/" + photo.id;
-                    } else if (mediaUrl == null) {
-                        mediaUrl = thumbUrl;
+                    MediaItem item;
+                    if ("shared_album".equals(photoMode)) {
+                        if (!"photo".equals(photo.category) && !"video".equals(photo.category)) continue;
+                        item = SharedAlbumSupport.mediaItem(baseUrl, photo);
+                    } else {
+                        FnHttpApi.GalleryThumbnail thumb = photo.additional != null ? photo.additional.thumbnail : null;
+                        String thumbUrl = thumb == null ? null : absoluteUrl(thumb.mUrl != null ? thumb.mUrl : thumb.sUrl);
+                        String mediaUrl = thumb == null ? null : absoluteUrl(thumb.originalUrl);
+                        if ("video".equals(photo.category)) {
+                            mediaUrl = thumb != null && thumb.videoUrl != null ? absoluteUrl(thumb.videoUrl)
+                                    : baseUrl + "/p/api/v1/stream/v/" + photo.id;
+                        } else if (mediaUrl == null) {
+                            mediaUrl = thumbUrl;
+                        }
+                        item = new MediaItem(String.valueOf(photo.id), photo.fileName,
+                                photo.category, thumbUrl, mediaUrl);
                     }
-                    MediaItem item = new MediaItem(String.valueOf(photo.id), photo.fileName,
-                            photo.category, thumbUrl, mediaUrl);
                     int position = currentMediaList.size();
                     currentMediaList.add(item);
                     photoPositions.put(item.getId(), position);
@@ -1527,6 +1668,17 @@ public class MainFragment extends BrowseSupportFragment {
         positionHandler.post(() -> setSelectedPosition(0));
     }
 
+    private void nextSharedAlbumWindow() {
+        requests.next();
+        positionHandler.removeCallbacksAndMessages(null);
+        savedSharedAlbumList = new ArrayList<>();
+        albumPositions.clear();
+        savedAlbumSelection = -1;
+        resetPagedRows();
+        loadSharedAlbumPage();
+        positionHandler.post(() -> setSelectedPosition(0));
+    }
+
     private void resetPagedRows() {
         mRowsAdapter.clear();
         pagedLastRow = null;
@@ -1559,7 +1711,9 @@ public class MainFragment extends BrowseSupportFragment {
         else if (isWindowFull(state, count)) status = "确定：下一批（替换本批" + count + "项）";
         else if (state == photoPaging && photoScan.isPaused()) status = scanPausedMessage();
         else if (state.hasMore()) status = "确定：加载更多（本批 " + count + " 项）";
-        else status = count == 0 ? "扫描到末尾 · 本批无匹配" : "扫描到末尾 · 本批 " + count + " 项";
+        else status = count == 0 ? (sharedAlbumDirectory ? "暂无共享相册"
+                : "shared_album".equals(photoMode) ? "相册为空" : "扫描到末尾 · 本批无匹配")
+                : "扫描到末尾 · 本批 " + count + " 项";
         MediaItem action = new MediaItem("__page_action", status, "page_action", null, null);
         if (pageFooter == null) {
             pageFooterAdapter = new ArrayObjectAdapter(mCardPresenter);
@@ -1987,7 +2141,17 @@ public class MainFragment extends BrowseSupportFragment {
         }
         Intent intent = new Intent(getActivity(), MediaDetailActivity.class);
         intent.putExtra("CURRENT_INDEX", index);
-        startActivity(intent);
+        intent.putExtra("SHARED_ALBUM_READ_ONLY", "shared_album".equals(photoMode));
+        if ("shared_album".equals(photoMode)) startActivityForResult(intent, SHARED_DETAIL_REQUEST);
+        else startActivity(intent);
+    }
+
+    @Override public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != SHARED_DETAIL_REQUEST || resultCode != android.app.Activity.RESULT_OK
+                || data == null || !"shared_album".equals(photoMode) || photoPaging == null) return;
+        Integer position = photoPositions.get(data.getStringExtra("LAST_MEDIA_ID"));
+        if (position != null) positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
     }
 
     private void openFolderBrowse(MediaItem folderItem) {

@@ -39,6 +39,7 @@ public class ApiInterceptor implements Interceptor {
         try {
             response = chain.proceed(request);
         } catch (IOException failure) {
+            if (failure instanceof CredentialRedirectInterceptor.BlockedRedirectException) throw failure;
             // A relocated FN ID may never return 401. Only retry read-only requests;
             // an interrupted mutation may already have been applied by the server.
             if (chain.call().isCanceled() || !nasRequest || !"GET".equals(request.method()) || !RememberedNasTarget.requiresDiscovery(source)

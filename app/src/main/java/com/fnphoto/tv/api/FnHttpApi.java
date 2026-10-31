@@ -11,7 +11,7 @@ import java.util.Map;
  * 
  * 认证头格式:
  *   accesstoken: <登录token>
- *   authx: nonce=<随机数>&timestamp=<时间戳>&sign=<HMAC-SHA256签名>
+ *   authx: nonce=<随机数>&timestamp=<时间戳>&sign=<按 FnAuthUtils 生成的 MD5 签名>
  */
 public interface FnHttpApi {
     
@@ -46,6 +46,30 @@ public interface FnHttpApi {
         @Query("limit") int limit
     );
     
+    /** Albums shared to the signed-in recipient; not the user's own album list. */
+    @GET("/p/api/v1/album_grant/list_to_me")
+    Call<SharedAlbumListResponse> getSharedAlbums(
+        @Header("accesstoken") String accesstoken,
+        @Header("authx") String authx,
+        @Query("offset") int offset,
+        @Query("limit") int limit,
+        @Query("sort_by") String sortBy,
+        @Query("sort_direction") String sortDirection
+    );
+
+    /** This endpoint uses camelCase query keys, unlike album/photos. */
+    @GET("/p/api/v1/album/normal/getList")
+    Call<GalleryListResponse> getSharedAlbumPhotos(
+        @Header("accesstoken") String accesstoken,
+        @Header("authx") String authx,
+        @Query("albumId") int albumId,
+        @Query("startTime") String startTime,
+        @Query("endTime") String endTime,
+        @Query("offset") int offset,
+        @Query("limit") int limit,
+        @Query("sortDirection") String sortDirection
+    );
+
     // ==================== 上传相关接口 ====================
     
     /**
@@ -388,6 +412,28 @@ public interface FnHttpApi {
         public List<NewAlbum> list;
     }
 
+    class SharedAlbumListResponse {
+        public int code = Integer.MIN_VALUE;
+        public String msg;
+        public SharedAlbumListData data;
+    }
+
+    class SharedAlbumListData {
+        public List<SharedAlbum> list;
+        public Integer total;
+    }
+
+    // Do not infer permission enums or owner identifiers from the handoff examples.
+    class SharedAlbum {
+        public int albumId;
+        public String albumName;
+        public int photoCount;
+        public int videoCount;
+        public String posterUrl;
+        public String posterImgUrl;
+        public String ownerName;
+    }
+
     class NewAlbum {
         public int albumId;
         public String albumName;
@@ -678,7 +724,7 @@ public interface FnHttpApi {
     // ==================== 照片列表接口 (/p/api/v1/gallery/getList) ====================
 
     class GalleryListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE;
         public String msg;
         public GalleryListData data;
     }
