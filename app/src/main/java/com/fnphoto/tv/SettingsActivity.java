@@ -126,7 +126,7 @@ public class SettingsActivity extends FragmentActivity {
 
         addSectionHeader("关于");
         LinearLayout aboutCard = createCard();
-        addInfoRow(aboutCard, "应用名称", "fnPhoto TV");
+        addInfoRow(aboutCard, "应用名称", getString(R.string.app_name));
         addInfoRow(aboutCard, "版本", BuildConfig.VERSION_NAME);
         addInfoRow(aboutCard, "开发", "基于飞牛 NAS 相册系统");
         contentLayout.addView(aboutCard);

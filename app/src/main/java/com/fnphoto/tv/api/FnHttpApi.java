@@ -403,7 +403,7 @@ public interface FnHttpApi {
     
     // 相册相关
     class AlbumListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public AlbumListData data;
     }
@@ -529,7 +529,7 @@ public interface FnHttpApi {
     
     // 文件夹列表响应 (GET /p/api/v1/photo/folder/list)
     class FolderListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public FolderListData data;
     }
@@ -573,7 +573,7 @@ public interface FnHttpApi {
     
     // 子文件夹列表响应 (GET /p/api/v1/folder_view/getFolderList)
     class SubFolderListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public SubFolderListData data;
     }
@@ -590,7 +590,7 @@ public interface FnHttpApi {
 
     // 文件夹文件列表响应 (GET /p/api/v1/folder_view/getFileList)
     class FolderFileListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public FolderFileListData data;
     }
@@ -696,7 +696,7 @@ public interface FnHttpApi {
     
     // 时间线
     class TimelineResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public TimelineData data;
     }
@@ -827,7 +827,7 @@ public interface FnHttpApi {
     // ==================== 地点相关 ====================
 
     class GeoListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public GeoListData data;
     }
@@ -895,7 +895,7 @@ public interface FnHttpApi {
     // ==================== 人物识别模型 ====================
 
     class PersonListResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public PersonListData data;
     }
@@ -914,7 +914,7 @@ public interface FnHttpApi {
     }
 
     class PersonTimelineResponse {
-        public int code;
+        public int code = Integer.MIN_VALUE; // Missing status must not become an empty success.
         public String msg;
         public PersonTimelineData data;
     }

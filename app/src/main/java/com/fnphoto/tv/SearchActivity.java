@@ -18,6 +18,7 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -49,6 +50,7 @@ public class SearchActivity extends FragmentActivity {
     private EditText editSearch;
     private RecyclerView rvResults;
     private TextView tvStatus;
+    private TvStateView screenState;
     private SearchAdapter adapter;
 
     private FnHttpApi api;
@@ -62,6 +64,7 @@ public class SearchActivity extends FragmentActivity {
     private Call<FnHttpApi.GalleryListResponse> searchCall;
     private boolean destroyed;
     private boolean queryReady;
+    private GridScreenState.Failure failure = GridScreenState.Failure.REQUEST;
     private Object dataGeneration = new Object();
     private MediaListHolder.PageCallback detailCallback;
 
@@ -155,9 +158,10 @@ public class SearchActivity extends FragmentActivity {
         tvStatus = new TextView(this);
         tvStatus.setText("输入关键词开始搜索");
         tvStatus.setTextColor(Color.parseColor("#A8AFBF"));
-        tvStatus.setTextSize(13);
+        tvStatus.setTextSize(18);
         tvStatus.setBackgroundResource(R.drawable.bg_menu_item);
-        tvStatus.setPadding(dp(72), dp(14), dp(64), dp(6));
+        tvStatus.setMinHeight(dp(52));
+        tvStatus.setPadding(dp(64), dp(12), dp(64), dp(12));
         tvStatus.setOnClickListener(v -> {
             if (pages.isWindowFull()) startNextWindow();
             else loadSearchPage(true);
@@ -167,9 +171,12 @@ public class SearchActivity extends FragmentActivity {
         rootLayout.addView(tvStatus);
 
         // 结果网格
+        FrameLayout content = new FrameLayout(this);
+        rootLayout.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         rvResults = new RecyclerView(this);
-        LinearLayout.LayoutParams gridLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        FrameLayout.LayoutParams gridLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
         rvResults.setLayoutParams(gridLp);
         rvResults.setClipToPadding(false);
         rvResults.setPadding(dp(48), dp(8), dp(48), dp(40));
@@ -185,7 +192,10 @@ public class SearchActivity extends FragmentActivity {
                 }
             }
         });
-        rootLayout.addView(rvResults);
+        content.addView(rvResults);
+        screenState = new TvStateView(this);
+        content.addView(screenState, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(rootLayout);
 
@@ -240,6 +250,7 @@ public class SearchActivity extends FragmentActivity {
             @Override
             public void afterTextChanged(Editable s) {}
         });
+        updateSearchStatus();
     }
 
     private void showKeyboard() {
@@ -266,6 +277,7 @@ public class SearchActivity extends FragmentActivity {
         }
         currentQuery = query;
         queryReady = false;
+        failure = GridScreenState.Failure.REQUEST;
         searchResults.clear();
         mediaItems.clear();
         adapter.notifyDataSetChanged();
@@ -276,6 +288,7 @@ public class SearchActivity extends FragmentActivity {
         if (api == null || destroyed || !queryReady || currentQuery.isEmpty()) return;
         final GridPageState.Request page = pages.begin(retry);
         if (page == null) return;
+        failure = GridScreenState.Failure.REQUEST;
         updateSearchStatus();
         String params = "keyword=" + currentQuery + "&limit=" + page.limit + "&offset=" + page.offset;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/search", "GET", params);
@@ -287,6 +300,7 @@ public class SearchActivity extends FragmentActivity {
                 FnHttpApi.GalleryListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
                         || result.data == null || result.data.list == null) {
+                    failure = GridScreenState.Failure.fromHttpStatus(response.code());
                     pages.fail(page);
                     updateSearchStatus();
                     return;
@@ -314,7 +328,10 @@ public class SearchActivity extends FragmentActivity {
             }
             @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
                 if (destroyed || call.isCanceled()) return;
-                if (pages.fail(page)) updateSearchStatus();
+                if (pages.fail(page)) {
+                    failure = GridScreenState.Failure.REQUEST;
+                    updateSearchStatus();
+                }
             }
         });
     }
@@ -331,22 +348,72 @@ public class SearchActivity extends FragmentActivity {
     }
 
     private void updateSearchStatus() {
+        boolean hasResults = !searchResults.isEmpty();
+        tvStatus.setVisibility(hasResults ? View.VISIBLE : View.GONE);
+        rvResults.setVisibility(hasResults ? View.VISIBLE : View.GONE);
         tvStatus.setFocusable(pages.hasError() || pages.isWindowFull());
         tvStatus.setClickable(pages.hasError() || pages.isWindowFull());
         if (currentQuery.isEmpty()) tvStatus.setText("输入关键词开始搜索");
         else if (pages.isInvalidPage()) tvStatus.setText("服务器分页响应超限或无效，未跳过记录；按确定重试或缩小关键词范围");
-        else if (pages.hasError()) tvStatus.setText("加载失败，按确定重试（已加载 " + searchResults.size() + " 项）");
+        else if (pages.hasError()) tvStatus.setText(failureHeading() + "，按确定重试（保留已加载 " + searchResults.size() + " 项）");
         else if (pages.isWindowFull()) tvStatus.setText("本批已扫描 " + pages.getWindowRows() + " 条、显示 "
                 + searchResults.size() + " 项；按确定查看下一批（替换当前列表）");
         else if (pages.isOffsetLimit()) tvStatus.setText(pages.boundaryMessage());
         else if (pages.isStalled()) tvStatus.setText("服务器返回重复页，已停止加载（已加载 " + searchResults.size() + " 项）");
         else if (pages.isLoading()) tvStatus.setText(searchResults.isEmpty() ? "搜索中..." : "正在加载更多...");
         else tvStatus.setText("已加载 " + searchResults.size() + " 个结果" + (pages.hasMore() ? "，下移加载更多" : ""));
+        if (hasResults) screenState.setVisibility(View.GONE);
+        else showSearchState(GridScreenState.search(currentQuery, queryReady, searchResults.size(), pages, failure));
         if (detailCallback != null && !pages.isLoading()) {
             MediaListHolder.PageCallback callback = detailCallback;
             detailCallback = null;
             if (pages.hasError()) callback.onFailure();
             else callback.onLoaded(toMediaItems(), pages.hasMore());
+        }
+    }
+
+    private String failureHeading() {
+        if (failure == GridScreenState.Failure.AUTHENTICATION) return "登录已失效";
+        if (failure == GridScreenState.Failure.PERMISSION) return "没有访问权限";
+        return "搜索失败";
+    }
+
+    private void showSearchState(GridScreenState.Kind state) {
+        switch (state) {
+            case INPUT:
+                screenState.bind("搜索照片和视频", "输入文件名关键词，查找 NAS 中的照片和视频。",
+                        "输入关键词", this::showKeyboard);
+                break;
+            case LOADING:
+                screenState.bind("正在搜索", "正在查找匹配的照片和视频，请稍候。", null, null);
+                screenState.setLoading(true);
+                break;
+            case NO_RESULTS:
+                screenState.bind("未找到搜索结果", "没有匹配此关键词的照片或视频。试试更短的文件名或其他关键词。",
+                        "修改关键词", this::showKeyboard);
+                break;
+            case EMPTY_WINDOW:
+                screenState.bind("本批没有更多结果", "此前已有匹配结果，当前批次没有更多照片或视频。可修改关键词继续查找。",
+                        "修改关键词", this::showKeyboard);
+                break;
+            case AUTHENTICATION:
+                screenState.bind("登录已失效", "当前登录无法继续访问。可重试；若仍失败，请返回并重新登录。",
+                        "重试", () -> loadSearchPage(true));
+                break;
+            case PERMISSION:
+                screenState.bind("没有访问权限", "服务器拒绝访问搜索结果。请检查当前账号的相册权限后重试。",
+                        "重试", () -> loadSearchPage(true));
+                break;
+            case BOUNDARY:
+                screenState.bind("搜索结果不完整", pages.boundaryMessage(),
+                        pages.isWindowFull() ? "查看下一批" : "修改关键词",
+                        pages.isWindowFull() ? this::startNextWindow : this::showKeyboard);
+                break;
+            default:
+                screenState.bind("搜索失败", pages.isInvalidPage()
+                                ? "服务器返回的分页数据无效，未跳过记录。请重试，或修改关键词缩小范围。"
+                                : "未能取得搜索结果。请检查网络和 NAS 服务后重试。",
+                        "重新加载", () -> loadSearchPage(true));
         }
     }
 
@@ -375,6 +442,7 @@ public class SearchActivity extends FragmentActivity {
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && editSearch.isFocused()) {
+            if (screenState.focusAction()) return true;
             if (tvStatus.isFocusable() && tvStatus.requestFocus()) return true;
             if (rvResults.requestFocus()) return true;
         }

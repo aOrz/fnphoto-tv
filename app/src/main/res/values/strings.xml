@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">fnPhoto TV</string>
+    <string name="app_name">飞牛相册</string>
     <string name="video_remote_help">左右：快退/快进 10 秒（长按连续） · 确定：播放/暂停\n上下或菜单：打开操作栏，切换媒体 · 返回：退出</string>
     <string name="video_controls_help">左右选择按钮 · 确定执行 · 返回收起操作栏\n上一项/下一项切换媒体，快退/快进只调整当前视频</string>
     <string name="video_previous">上一项</string>

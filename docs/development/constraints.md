@@ -112,8 +112,9 @@ UUID 按一个路径段编码，拒绝 `.`/`..`，缺失时不拼 `/null`。
 共享封面初始地址只接受相对或 NAS 同源 URL。详细来源/fixture 见 [共享说明](../shared-albums.md)。
 
 `BaseResponse` 使用 nullable `code`、`errno` 缺失哨兵和 `result` 判定，防止全缺失默认成功。
-该保护尚未覆盖所有 DTO，`AlbumListResponse`、`FolderListResponse` 等仍有默认 `int code`；
-新增或修改响应模型时检查缺字段行为，不能宣称所有接口都已拒绝缺失业务码。
+图库、相册、共享、文件夹/子目录/文件、人物/人物时间线和地点目录列表 DTO 使用
+`Integer.MIN_VALUE` 缺失哨兵，缺失/null `code` 不作为成功空列表；见 [TV 列表状态](../empty-states.md)。
+该保护尚未覆盖所有 DTO；新增或修改响应模型时检查缺字段行为，不能宣称所有接口都已拒绝缺失业务码。
 地点的 `SERVER_REPORTED_END` 仅表示该响应声称结束，不能独立证明结果完整；
 `UNKNOWN/SERVER_HAS_MORE/CLIENT_LIMIT` 必须在 UI 暴露。参见 [地点合同](../large-library-api-contract.md)。
 

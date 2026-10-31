@@ -52,6 +52,7 @@
 | 修改主题 | 优先阅读的实现/现有测试 |
 | --- | --- |
 | 焦点、卡片复用 | `FocusImageCardView`、`CardPresenter`、`MainFragment.focusBrowseContent`、`item_photo_grid.xml`；另做设备 QA |
+| 空/加载/错误状态 | `TvStateView`、`BrowseStatus`、`GridScreenState` 及同名状态测试；设备 `EmptyStateDeviceTest`，见 [TV 列表状态](../empty-states.md) |
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
 | 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget` 及同名 Test |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |

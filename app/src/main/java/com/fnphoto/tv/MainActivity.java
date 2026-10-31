@@ -13,7 +13,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.widget.LinearLayout;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.core.view.GravityCompat;
@@ -35,6 +35,9 @@ public class MainActivity extends FragmentActivity {
     private VerticalGridView menuGrid;
     private MenuAdapter menuAdapter;
     private TextView tvMode;
+    private TvStateView browseState;
+    private boolean browseLoading;
+    private boolean browseMenuActive;
     private FnHttpApi api;
     private String token;
     private String secret;
@@ -122,6 +125,9 @@ public class MainActivity extends FragmentActivity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         
         setContentView(R.layout.activity_main);
+        browseState = new TvStateView(this);
+        ((FrameLayout) findViewById(R.id.browse_state_container)).addView(browseState,
+                new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         baseUrl = prefs.getString("nas_url", "");
@@ -190,7 +196,21 @@ public class MainActivity extends FragmentActivity {
         menuAdapter.add(new MenuItem("退出登录", "logout"));
 
         drawerLayout.addDrawerListener(new DrawerLayout.SimpleDrawerListener() {
+            @Override public void onDrawerSlide(View drawerView, float slideOffset) {
+                if (slideOffset > 0) browseMenuActive = true;
+            }
+            @Override public void onDrawerStateChanged(int state) {
+                // Reversing an opening animation can finish without onDrawerClosed in DrawerLayout 1.1.1.
+                if (state == DrawerLayout.STATE_IDLE && browseMenuActive
+                        && !drawerLayout.isDrawerVisible(GravityCompat.END)) {
+                    browseMenuActive = false;
+                    MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                            .findFragmentById(R.id.main_content_container);
+                    if (fragment != null) fragment.focusBrowseContent();
+                }
+            }
             @Override public void onDrawerClosed(View drawerView) {
+                browseMenuActive = false;
                 MainFragment fragment = (MainFragment) getSupportFragmentManager()
                         .findFragmentById(R.id.main_content_container);
                 if (fragment != null) fragment.focusBrowseContent();
@@ -226,7 +246,9 @@ public class MainActivity extends FragmentActivity {
                 .commit();
     }
 
-    private void openBrowseMenu() {
+    void openBrowseMenu() {
+        // Block async focus immediately, including the first frame of the opening animation.
+        browseMenuActive = true;
         for (int i = 0; i < menuAdapter.getItemCount(); i++) {
             if (currentBrowseMode.menuAction().equals(menuAdapter.get(i).getAction())) {
                 menuGrid.setSelectedPosition(i);
@@ -235,6 +257,15 @@ public class MainActivity extends FragmentActivity {
         }
         drawerLayout.openDrawer(GravityCompat.END);
         menuGrid.requestFocus();
+    }
+
+    private void closeBrowseMenu() {
+        browseMenuActive = false;
+        drawerLayout.closeDrawer(GravityCompat.END);
+        // If opening was canceled before its first frame, no drawer callback may follow.
+        MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.main_content_container);
+        if (fragment != null) fragment.focusBrowseContent();
     }
 
     @Override protected void onStart() {
@@ -290,7 +321,8 @@ public class MainActivity extends FragmentActivity {
     }
 
     boolean canFocusBrowseContent() {
-        return !isFinishing() && hasWindowFocus() && !drawerLayout.isDrawerOpen(GravityCompat.END);
+        return !isFinishing() && hasWindowFocus() && !browseMenuActive
+                && !drawerLayout.isDrawerVisible(GravityCompat.END);
     }
 
     void focusBrowseMenuButton() {
@@ -302,27 +334,43 @@ public class MainActivity extends FragmentActivity {
     }
 
     public void showLoading(String message) {
-        LinearLayout overlay = findViewById(R.id.loading_overlay);
-        if (overlay != null) {
-            TextView tv = overlay.findViewById(R.id.tv_loading_text);
-            if (tv != null && message != null) tv.setText(message);
-            overlay.setVisibility(View.VISIBLE);
-            overlay.bringToFront();
-        }
+        showBrowseState(message == null ? "正在加载" : message,
+                "正在从 NAS 获取内容，请稍候。也可切换其他浏览方式。", "浏览其他内容", this::openBrowseMenu);
+        browseLoading = true;
+        browseState.setLoading(true);
     }
 
     public void hideLoading() {
-        LinearLayout overlay = findViewById(R.id.loading_overlay);
-        if (overlay != null) {
-            overlay.setVisibility(View.GONE);
-        }
+        if (browseLoading) clearBrowseState();
+    }
+
+    void showBrowseState(String title, String message, String action, Runnable onAction) {
+        browseLoading = false;
+        browseState.bind(title, message, action, onAction);
+        findViewById(R.id.main_content_container).setVisibility(View.INVISIBLE);
+        findViewById(R.id.browse_state_container).setVisibility(View.VISIBLE);
+    }
+
+    void clearBrowseState() {
+        browseLoading = false;
+        browseState.setVisibility(View.GONE);
+        findViewById(R.id.browse_state_container).setVisibility(View.GONE);
+        findViewById(R.id.main_content_container).setVisibility(View.VISIBLE);
+    }
+
+    boolean focusBrowseState() {
+        return canFocusBrowseContent() && browseState.focusAction();
+    }
+
+    boolean hasBrowseStateFocus() {
+        return browseState.isActionFocused();
     }
 
     private void handleMenuSelection(MenuItem item) {
         Log.d(TAG, "Menu selected: " + item.getAction());
         BrowseMode mode = BrowseMode.fromId(item.getAction());
         if (mode != null) {
-            drawerLayout.closeDrawer(GravityCompat.END);
+            closeBrowseMenu();
             selectBrowseMode(mode);
             return;
         }
@@ -337,7 +385,7 @@ public class MainActivity extends FragmentActivity {
                 logout();
                 return;
             case "media_types":
-                drawerLayout.closeDrawer(GravityCompat.END);
+                closeBrowseMenu();
                 new android.app.AlertDialog.Builder(this)
                     .setTitle("媒体类型")
                     .setItems(new String[]{"照片", "视频"}, (dialog, which) -> {
@@ -351,21 +399,21 @@ public class MainActivity extends FragmentActivity {
                     .setTitle(item.getTitle())
                     .setMessage("此功能尚未接入：当前缺少可验证的飞牛相册接口协议。需要对应 NAS 版本的接口文档或脱敏请求/响应样本，不能将其他列表冒充为此功能。")
                     .setPositiveButton("知道了", null).show();
-                drawerLayout.closeDrawer(GravityCompat.END);
+                closeBrowseMenu();
                 return;
         }
         
-        drawerLayout.closeDrawer(GravityCompat.END);
+        closeBrowseMenu();
     }
     
     private void openSettings() {
-        drawerLayout.closeDrawer(GravityCompat.END);
+        closeBrowseMenu();
         Intent intent = new Intent(this, SettingsActivity.class);
         startActivity(intent);
     }
     
     private void openSearch() {
-        drawerLayout.closeDrawer(GravityCompat.END);
+        closeBrowseMenu();
         Intent intent = new Intent(this, SearchActivity.class);
         startActivity(intent);
     }
@@ -402,15 +450,15 @@ public class MainActivity extends FragmentActivity {
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_MENU) {
             // 菜单键切换侧滑菜单
-            if (drawerLayout.isDrawerOpen(GravityCompat.END)) {
-                drawerLayout.closeDrawer(GravityCompat.END);
+            if (browseMenuActive || drawerLayout.isDrawerVisible(GravityCompat.END)) {
+                closeBrowseMenu();
             } else {
                 openBrowseMenu();
             }
             return true;
         } else if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (drawerLayout.isDrawerOpen(GravityCompat.END)) {
-                drawerLayout.closeDrawer(GravityCompat.END);
+            if (browseMenuActive || drawerLayout.isDrawerVisible(GravityCompat.END)) {
+                closeBrowseMenu();
                 return true;
             }
             
