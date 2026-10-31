@@ -42,7 +42,9 @@
    与 [SearchActivity](../../app/src/main/java/com/fnphoto/tv/SearchActivity.java)
    使用独立网格；前者在同一 Activity 内下钻目录，后者按当前查询取消过时结果。
    搜索输入框在控件按键监听器中处理下移，保证错误/重试/结果可达，避免被 EditText
-   光标移动提前消费；验证见 `EmptyStateDeviceTest` 与 [TV 列表状态](../empty-states.md)。
+   光标移动提前消费；浏览遥控键另在 pre-IME 阶段绕过隐藏输入法，`SearchKeyboardState`
+   固定键对归属，显式/可见键盘仍拥有编辑键。验证见同名状态测试、`EmptyStateDeviceTest`
+   与 [TV 列表状态](../empty-states.md)。
 5. 列表用 [MediaListHolder](../../app/src/main/java/com/fnphoto/tv/MediaListHolder.java)
    做进程内交接，向 [MediaDetailActivity](../../app/src/main/java/com/fnphoto/tv/MediaDetailActivity.java)
    提供当前窗口与 `PageSource`。`MediaPageController` 管理详情分页交付，列表仍拥有网络分页。

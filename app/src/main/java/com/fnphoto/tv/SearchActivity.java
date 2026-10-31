@@ -4,10 +4,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ResultReceiver;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
@@ -67,6 +69,7 @@ public class SearchActivity extends FragmentActivity {
     private GridScreenState.Failure failure = GridScreenState.Failure.REQUEST;
     private Object dataGeneration = new Object();
     private MediaListHolder.PageCallback detailCallback;
+    private final SearchKeyboardState keyboardState = new SearchKeyboardState();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -105,7 +108,54 @@ public class SearchActivity extends FragmentActivity {
     }
 
     private void initViews() {
-        LinearLayout rootLayout = new LinearLayout(this);
+        LinearLayout rootLayout = new LinearLayout(this) {
+            private final Rect visibleFrame = new Rect();
+
+            // Old androidx.core annotates the public Activity/Window.Callback override restricted.
+            // This calls that public framework entry point, not a private AndroidX helper.
+            @android.annotation.SuppressLint("RestrictedApi")
+            @Override public boolean dispatchKeyEventPreIme(KeyEvent event) {
+                observeKeyboard();
+                if (isRemoteKey(event.getKeyCode()) && keyboardState.routeKey(
+                        event.getDeviceId(), event.getKeyCode(), event.getDownTime(),
+                        event.getAction() == KeyEvent.ACTION_DOWN,
+                        event.getAction() == KeyEvent.ACTION_UP)) {
+                    // A hidden TV IME can still consume keys (or return them after a timeout).
+                    // Browse keys must reach the focused View before that asynchronous hop.
+                    boolean handled = SearchActivity.this.dispatchKeyEvent(event);
+                    int direction = focusDirection(event.getKeyCode());
+                    if (!handled && direction != 0 && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        View focused = findFocus();
+                        View next = focused != null ? focused.focusSearch(direction) : null;
+                        if (next != null) next.requestFocus(direction);
+                    }
+                    return true; // Keep both down/up on the same browse path, even at an edge.
+                }
+                if (event.getKeyCode() == KeyEvent.KEYCODE_BACK
+                        && event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                    keyboardState.dismiss();
+                    disableAutomaticKeyboard();
+                }
+                return super.dispatchKeyEventPreIme(event);
+            }
+
+            private void observeKeyboard() {
+                getWindowVisibleDisplayFrame(visibleFrame);
+                // This Activity is full-screen. A docked IME obscures much more than system bars.
+                // Explicit keyboard ownership also protects floating/non-resizing IMEs.
+                keyboardState.observeVisibility(getRootView().getHeight() - visibleFrame.bottom > dp(100));
+            }
+
+            @Override public void onWindowFocusChanged(boolean hasWindowFocus) {
+                super.onWindowFocusChanged(hasWindowFocus);
+                if (!hasWindowFocus) keyboardState.clearKeys();
+            }
+
+            @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+                super.onSizeChanged(w, h, oldw, oldh);
+                observeKeyboard();
+            }
+        };
         rootLayout.setOrientation(LinearLayout.VERTICAL);
         rootLayout.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -138,6 +188,10 @@ public class SearchActivity extends FragmentActivity {
         editSearch.setHintTextColor(Color.parseColor("#6E7686"));
         editSearch.setTextSize(17);
         editSearch.setSingleLine(true);
+        // Set before attaching the editor: initial focus must not queue a delayed IME show.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            editSearch.setShowSoftInputOnFocus(false);
+        }
         editSearch.setBackgroundResource(R.drawable.bg_search_field);
         editSearch.setPadding(dp(24), 0, dp(24), 0);
         editSearch.setIncludeFontPadding(false);
@@ -200,16 +254,13 @@ public class SearchActivity extends FragmentActivity {
         setContentView(rootLayout);
 
         // 初始不弹软键盘：按 OK / 回车再唤起，避免遮挡画面
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-            editSearch.setShowSoftInputOnFocus(false);
-        }
         editSearch.postDelayed(new Runnable() {
             @Override
             public void run() {
                 android.view.inputmethod.InputMethodManager imm =
                         (android.view.inputmethod.InputMethodManager)
                                 getSystemService(Context.INPUT_METHOD_SERVICE);
-                if (imm != null && editSearch.getWindowToken() != null) {
+                if (keyboardState.shouldHideInitialKeyboard() && imm != null && editSearch.getWindowToken() != null) {
                     imm.hideSoftInputFromWindow(editSearch.getWindowToken(), 0);
                 }
             }
@@ -221,17 +272,25 @@ public class SearchActivity extends FragmentActivity {
                 // EditText consumes DPAD_DOWN for cursor movement before Activity.onKeyDown.
                 // Route the user's explicit focus move here, without focusing on async updates.
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN
-                        && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        && event.getAction() == KeyEvent.ACTION_DOWN
+                        && keyboardState.routesRemoteKeys()) {
                     return focusSearchContent();
                 }
                 boolean isOk = keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                         || keyCode == KeyEvent.KEYCODE_ENTER;
-                if (isOk && event.getAction() == KeyEvent.ACTION_UP) {
+                if (isOk && event.getAction() == KeyEvent.ACTION_UP
+                        && keyboardState.routesRemoteKeys()) {
                     showKeyboard();
                     return true;
                 }
                 return false;
             }
+        });
+
+        editSearch.setOnEditorActionListener((view, action, event) -> {
+            if (action != EditorInfo.IME_ACTION_SEARCH && action != EditorInfo.IME_ACTION_DONE) return false;
+            hideKeyboard();
+            return true;
         });
 
         // Auto-focus search input
@@ -260,6 +319,7 @@ public class SearchActivity extends FragmentActivity {
     }
 
     private void showKeyboard() {
+        final int request = keyboardState.request();
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
             editSearch.setShowSoftInputOnFocus(true);
         }
@@ -267,9 +327,46 @@ public class SearchActivity extends FragmentActivity {
         android.view.inputmethod.InputMethodManager imm =
                 (android.view.inputmethod.InputMethodManager)
                         getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null) {
-            imm.showSoftInput(editSearch, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+        boolean accepted = imm != null && imm.showSoftInput(editSearch,
+                android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT,
+                new ResultReceiver(new Handler(Looper.getMainLooper())) {
+                    @Override protected void onReceiveResult(int resultCode, Bundle resultData) {
+                        if (resultCode == android.view.inputmethod.InputMethodManager.RESULT_UNCHANGED_HIDDEN
+                                || resultCode == android.view.inputmethod.InputMethodManager.RESULT_HIDDEN) {
+                            if (keyboardState.rejectRequest(request)) disableAutomaticKeyboard();
+                        }
+                    }
+                });
+        if (!accepted && keyboardState.rejectRequest(request)) disableAutomaticKeyboard();
+    }
+
+    private void hideKeyboard() {
+        keyboardState.dismiss();
+        disableAutomaticKeyboard();
+        android.view.inputmethod.InputMethodManager imm =
+                (android.view.inputmethod.InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(editSearch.getWindowToken(), 0);
+    }
+
+    private void disableAutomaticKeyboard() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            editSearch.setShowSoftInputOnFocus(false);
         }
+    }
+
+    private static int focusDirection(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP: return View.FOCUS_UP;
+            case KeyEvent.KEYCODE_DPAD_DOWN: return View.FOCUS_DOWN;
+            case KeyEvent.KEYCODE_DPAD_LEFT: return View.FOCUS_LEFT;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: return View.FOCUS_RIGHT;
+            default: return 0;
+        }
+    }
+
+    private static boolean isRemoteKey(int keyCode) {
+        return focusDirection(keyCode) != 0 || keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_BACK;
     }
 
     private void resetSearch(String query) {
@@ -425,6 +522,8 @@ public class SearchActivity extends FragmentActivity {
 
     @Override protected void onDestroy() {
         destroyed = true;
+        keyboardState.dismiss();
+        keyboardState.clearKeys();
         pages.close();
         searchHandler.removeCallbacksAndMessages(null);
         if (searchCall != null) searchCall.cancel();
@@ -450,7 +549,8 @@ public class SearchActivity extends FragmentActivity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            finish();
+            if (!keyboardState.routesRemoteKeys()) hideKeyboard();
+            else finish();
             return true;
         }
         return super.onKeyDown(keyCode, event);
