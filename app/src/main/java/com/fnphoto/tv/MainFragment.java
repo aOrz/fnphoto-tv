@@ -61,6 +61,9 @@ public class MainFragment extends BrowseSupportFragment {
     private int savedAlbumSelection = -1;
     private String photoMode;
     private String photoDate;
+    private String photoRangeStart;
+    private String photoRangeEnd;
+    private String photoCategory;
     private int photoAlbumId;
     private int photoPersonId;
     private String pagedTitle;
@@ -78,6 +81,8 @@ public class MainFragment extends BrowseSupportFragment {
     private CardPresenter mCardPresenter;
     private List<FnHttpApi.TimelineItem> timelineItems;
     private boolean isPhotoListView = false;
+    private boolean favoritesTimeline;
+    private long collectionRevision;
     private List<MediaItem> currentMediaList;
     
     // 懒加载相关
@@ -131,6 +136,26 @@ public class MainFragment extends BrowseSupportFragment {
 
         setupEventListeners();
         watchTokenChanges();
+        if (getActivity() != null) collectionRevision = getActivity()
+                .getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE).getLong("collect_revision", 0L);
+    }
+
+    @Override public void onResume() {
+        super.onResume();
+        if (getActivity() == null) return;
+        long revision = getActivity().getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE)
+                .getLong("collect_revision", 0L);
+        if (revision == collectionRevision) return;
+        collectionRevision = revision;
+        java.util.Iterator<String> keys = previewThumbnailCache.keySet().iterator();
+        while (keys.hasNext()) if (keys.next().startsWith("favorites:")) keys.remove();
+        if (favoritesTimeline) {
+            if (isPhotoListView && "favorites".equals(photoMode) && photoDate != null) {
+                loadPhotosByDate(photoDate, 0);
+            } else {
+                loadFavorites();
+            }
+        }
     }
 
     private void watchTokenChanges() {
@@ -176,6 +201,8 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void beginRootScreen() {
         beginScreen();
+        favoritesTimeline = false;
+        photoMode = null;
         timelineItems = null;
         currentMediaList = null;
         albumPaging = null;
@@ -354,12 +381,17 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     public boolean onBackPressed() {
+        // Media type is a root screen, not a drill-down. Preserve its cursor on first BACK.
+        if (isPhotoListView && "media_type".equals(photoMode)) return false;
         if (isPhotoListView) {
             beginScreen();
             if (timelineItems != null) {
                 Log.d(TAG, "Returning to timeline");
                 savePhotoListPosition();
-                displayTimeline(timelineItems);
+                // A detail-view collect/uncollect may remove the date entirely.
+                // Reusing the old aggregate would leave a stale count/empty date card.
+                if (favoritesTimeline) loadFavorites(true);
+                else displayTimeline(timelineItems);
             } else if (savedAlbumList != null) {
                 Log.d(TAG, "Returning to album list");
                 displayAlbums(savedAlbumList);
@@ -515,8 +547,8 @@ public class MainFragment extends BrowseSupportFragment {
                 item.itemCount
             );
             // 如果缓存中有预览缩略图，直接复用
-            if (previewThumbnailCache.containsKey(dateStr)) {
-                mediaItem.setPreviewThumbUrls(previewThumbnailCache.get(dateStr));
+            if (previewThumbnailCache.containsKey(PhotoSelection.cacheKey(favoritesTimeline, dateStr))) {
+                mediaItem.setPreviewThumbUrls(previewThumbnailCache.get(PhotoSelection.cacheKey(favoritesTimeline, dateStr)));
             }
             currentRowAdapter.add(mediaItem);
             previewRows.put(mediaItem, currentRowAdapter);
@@ -708,6 +740,11 @@ public class MainFragment extends BrowseSupportFragment {
         }
         
         String dateStr = mediaItem.getDateStr();
+        if (favoritesTimeline) {
+            loadFavoriteDatePreview(mediaItem, dateStr, new MainPagingState(PHOTO_PAGE_SIZE),
+                    new ArrayList<>(), onComplete);
+            return;
+        }
         String dateTime = dateStr.replace("-", ":");
         String startTime = dateTime + " 00:00:00";
         String endTime = dateTime + " 23:59:59";
@@ -736,6 +773,7 @@ public class MainFragment extends BrowseSupportFragment {
                         if (result.code == 0 && result.data != null && result.data.list != null) {
                             List<String> thumbUrls = new ArrayList<>();
                             for (FnHttpApi.GalleryPhoto photo : result.data.list) {
+                                if (!PhotoSelection.includes(favoritesTimeline, photo.isCollect)) continue;
                                 if (photo.additional != null && photo.additional.thumbnail != null) {
                                     String thumbUrl = photo.additional.thumbnail.sUrl;
                                     if (thumbUrl == null) {
@@ -750,7 +788,7 @@ public class MainFragment extends BrowseSupportFragment {
                                 }
                             }
                             mediaItem.setPreviewThumbUrls(thumbUrls);
-                            previewThumbnailCache.put(dateStr, thumbUrls);
+                            previewThumbnailCache.put(PhotoSelection.cacheKey(favoritesTimeline, dateStr), thumbUrls);
                         }
                     }
                     if (onComplete != null) onComplete.run();
@@ -762,6 +800,53 @@ public class MainFragment extends BrowseSupportFragment {
                     if (onComplete != null) onComplete.run();
                 }
             });
+    }
+
+    private void loadFavoriteDatePreview(MediaItem item, String date, MainPagingState paging,
+                                         List<String> urls, Runnable onComplete) {
+        int offset = paging.begin();
+        if (offset < 0) {
+            if (onComplete != null) onComplete.run();
+            return;
+        }
+        String start = date.replace("-", ":") + " 00:00:00";
+        String end = date.replace("-", ":") + " 23:59:59";
+        String params = "end_time=" + end + "&limit=" + PHOTO_PAGE_SIZE
+                + "&mode=index&offset=" + offset + "&start_time=" + start;
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/getList", "GET", params);
+        enqueue(api.getPhotosByTimeRange(token, authx, start, end, PHOTO_PAGE_SIZE, offset, "index"),
+                new Callback<FnHttpApi.GalleryListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
+                    Response<FnHttpApi.GalleryListResponse> response) {
+                FnHttpApi.GalleryListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    if (onComplete != null) onComplete.run();
+                    return;
+                }
+                List<String> ids = new ArrayList<>();
+                for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
+                for (int index : paging.accept(ids, result.data.hasNext)) {
+                    FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
+                    if (!PhotoSelection.includes(true, photo.isCollect) || photo.additional == null
+                            || photo.additional.thumbnail == null) continue;
+                    FnHttpApi.GalleryThumbnail thumb = photo.additional.thumbnail;
+                    String url = absoluteUrl(thumb.sUrl != null ? thumb.sUrl : thumb.mUrl);
+                    if (url != null) urls.add(url);
+                    if (urls.size() == 4) break;
+                }
+                if (urls.size() < 4 && paging.hasMore()) {
+                    loadFavoriteDatePreview(item, date, paging, urls, onComplete);
+                    return;
+                }
+                item.setPreviewThumbUrls(urls);
+                previewThumbnailCache.put(PhotoSelection.cacheKey(true, date), urls);
+                if (onComplete != null) onComplete.run();
+            }
+            @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable error) {
+                if (onComplete != null) onComplete.run();
+            }
+        });
     }
 
     private void schedulePersonLazyLoad(int centerIndex) {
@@ -869,21 +954,70 @@ public class MainFragment extends BrowseSupportFragment {
             });
     }
 
+    /** Browse a media category using only the existing timeline/date-list contract. */
+    public void loadMediaType(String category) {
+        if (api == null || token == null || token.isEmpty()
+                || !("photo".equals(category) || "video".equals(category))) return;
+        beginRootScreen();
+        photoCategory = category;
+        final String title = "video".equals(category) ? "视频" : "照片";
+        showLoadingOverlay("正在加载" + title + "...");
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", null);
+        enqueue(api.getTimeline(token, authx, null), new Callback<FnHttpApi.TimelineResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.TimelineResponse> call,
+                    Response<FnHttpApi.TimelineResponse> response) {
+                hideLoadingOverlay();
+                FnHttpApi.TimelineResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    showEmptyState("加载失败，请重新选择媒体类型重试");
+                    return;
+                }
+                String first = null;
+                String last = null;
+                for (FnHttpApi.TimelineItem item : result.data.list) {
+                    String date = String.format(java.util.Locale.US, "%04d:%02d:%02d",
+                            item.year, item.month, item.day);
+                    if (first == null || date.compareTo(first) < 0) first = date;
+                    if (last == null || date.compareTo(last) > 0) last = date;
+                }
+                if (first == null) {
+                    showEmptyState("暂无" + title);
+                    return;
+                }
+                photoRangeStart = first + " 00:00:00";
+                photoRangeEnd = last + " 23:59:59";
+                startPhotoPaging("media_type", title);
+            }
+            @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
+                hideLoadingOverlay();
+                showEmptyState("加载失败，请重新选择媒体类型重试");
+            }
+        });
+    }
+
     public void loadPhotosByDate(String dateStr, int itemCount) {
         if (api == null || token == null || token.isEmpty()) return;
         saveTimelinePosition();
         beginScreen();
         photoDate = dateStr;
-        startPhotoPaging("date", dateStr);
+        startPhotoPaging(favoritesTimeline ? "favorites" : "date", dateStr);
     }
 
     public void loadFavorites() {
+        loadFavorites(false);
+    }
+
+    private void loadFavorites(boolean restorePosition) {
         if (api == null || token == null || token.isEmpty()) {
             Log.e(TAG, "API未初始化");
             return;
         }
 
+        int previousPosition = savedTimelinePosition;
         beginRootScreen();
+        if (restorePosition) savedTimelinePosition = previousPosition;
+        favoritesTimeline = true;
         showLoadingOverlay("正在加载收藏...");
         String params = "is_collect=1";
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", params);
@@ -896,7 +1030,8 @@ public class MainFragment extends BrowseSupportFragment {
                 if (response.isSuccessful() && response.body() != null) {
                     FnHttpApi.TimelineResponse result = response.body();
                     if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayTimeline(result.data.list);
+                        if (result.data.list.isEmpty()) showEmptyState("暂无收藏");
+                        else displayTimeline(result.data.list);
                     } else {
                         showEmptyState("暂无收藏");
                     }
@@ -1000,7 +1135,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             for (int i = start; i < end; i++) {
                 FnHttpApi.GeoItem geo = places.get(i);
-                String posterUrl = geo.posterUrl != null ? baseUrl + geo.posterUrl : null;
+                String posterUrl = absoluteUrl(geo.posterUrl);
                 MediaItem item = new MediaItem(
                     geo.country + "/" + geo.city,
                     geo.city + "，" + geo.country,
@@ -1065,9 +1200,9 @@ public class MainFragment extends BrowseSupportFragment {
             String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/photos", "GET", params);
             request = api.getAlbumPhotos(token, authx, photoAlbumId, "date_time", "desc", offset, PHOTO_PAGE_SIZE);
         } else {
-            String dateTime = photoDate.replace("-", ":");
-            String start = dateTime + " 00:00:00";
-            String end = dateTime + " 23:59:59";
+            String dateTime = "media_type".equals(photoMode) ? null : photoDate.replace("-", ":");
+            String start = "media_type".equals(photoMode) ? photoRangeStart : dateTime + " 00:00:00";
+            String end = "media_type".equals(photoMode) ? photoRangeEnd : dateTime + " 23:59:59";
             if ("person".equals(photoMode)) {
                 String params = "album_id=" + photoPersonId + "&endTime=" + end + "&end_time=" + end
                         + "&limit=" + PHOTO_PAGE_SIZE + "&offset=" + offset + "&personId=" + photoPersonId
@@ -1092,10 +1227,13 @@ public class MainFragment extends BrowseSupportFragment {
                     finishPhotoPage(false);
                     return;
                 }
+                int previousCount = currentMediaList.size();
                 List<String> ids = new ArrayList<>();
                 for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
                 for (int index : photoPaging.accept(ids, result.data.hasNext)) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
+                    if (!PhotoSelection.includes("favorites".equals(photoMode), photo.isCollect)
+                            || !PhotoSelection.matchesCategory("media_type".equals(photoMode) ? photoCategory : null, photo.category)) continue;
                     FnHttpApi.GalleryThumbnail thumb = photo.additional != null ? photo.additional.thumbnail : null;
                     String thumbUrl = thumb == null ? null : absoluteUrl(thumb.mUrl != null ? thumb.mUrl : thumb.sUrl);
                     String mediaUrl = thumb == null ? null : absoluteUrl(thumb.originalUrl);
@@ -1112,8 +1250,15 @@ public class MainFragment extends BrowseSupportFragment {
                     photoPositions.put(item.getId(), position);
                     appendPagedCard(item, position);
                 }
+                // Advance over uncollected raw rows without ending a detail-view request early.
+                if (("favorites".equals(photoMode) || "media_type".equals(photoMode))
+                        && currentMediaList.size() == previousCount
+                        && photoPaging.hasMore()) {
+                    loadPhotoPage();
+                    return;
+                }
                 finishPhotoPage(true);
-                if (offset == 0 && !currentMediaList.isEmpty()) {
+                if (previousCount == 0 && !currentMediaList.isEmpty()) {
                     positionHandler.post(() -> setSelectedPosition(0));
                 }
             }
@@ -1306,10 +1451,16 @@ public class MainFragment extends BrowseSupportFragment {
 
                 if (photo.additional != null && photo.additional.thumbnail != null) {
                     FnHttpApi.GalleryThumbnail thumbnail = photo.additional.thumbnail;
-                    thumbUrl = thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : (thumbnail.sUrl != null ? baseUrl + thumbnail.sUrl : null);
-                    mediaUrl = thumbnail.originalUrl != null ? baseUrl + thumbnail.originalUrl : null;
+                    thumbUrl = absoluteUrl(thumbnail.mUrl != null ? thumbnail.mUrl : thumbnail.sUrl);
+                    mediaUrl = absoluteUrl(thumbnail.originalUrl);
+                    if ("video".equals(photo.category)) mediaUrl = absoluteUrl(thumbnail.videoUrl);
                 }
 
+                if ("video".equals(photo.category) && mediaUrl == null) {
+                    mediaUrl = baseUrl + "/p/api/v1/stream/v/" + photo.id;
+                } else if (mediaUrl == null) {
+                    mediaUrl = thumbUrl;
+                }
                 MediaItem item = new MediaItem(
                     String.valueOf(photo.id),
                     photo.fileName,

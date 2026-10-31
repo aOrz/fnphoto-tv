@@ -16,6 +16,7 @@ import androidx.fragment.app.FragmentActivity;
 import com.fnphoto.tv.api.FnConnectApi;
 import com.fnphoto.tv.api.FnWebSocketClient;
 import com.fnphoto.tv.api.UrlUtils;
+import com.fnphoto.tv.api.RememberedNasTarget;
 import org.json.JSONObject;
 
 public class LoginActivity extends FragmentActivity {
@@ -24,6 +25,8 @@ public class LoginActivity extends FragmentActivity {
     private ProgressBar progressBar;
     private TextView tvStatus;
     private FnWebSocketClient wsClient;
+    private boolean authenticated;
+    private volatile boolean destroyed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -33,12 +36,12 @@ public class LoginActivity extends FragmentActivity {
         boolean hasCredentials = prefs.getBoolean("has_credentials", false);
 
         if (hasCredentials) {
-            String savedUrl = prefs.getString("saved_url", "");
+            String savedUrl = RememberedNasTarget.source(prefs.getString("saved_source", ""), prefs.getString("saved_url", ""));
             String savedUser = prefs.getString("saved_user", "");
             String savedPass = prefs.getString("saved_pass", "");
 
             if (!savedUrl.isEmpty() && !savedUser.isEmpty() && !savedPass.isEmpty()) {
-                if (prefs.getString("api_token", "").isEmpty()) {
+                if (prefs.getString("api_token", "").isEmpty() || RememberedNasTarget.requiresDiscovery(savedUrl)) {
                     showLoginUI();
                     autoLogin(savedUrl, savedUser, savedPass);
                 } else {
@@ -68,7 +71,7 @@ public class LoginActivity extends FragmentActivity {
         tvStatus = findViewById(R.id.tv_status);
 
         SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
-        String savedUrl = prefs.getString("saved_url", "");
+        String savedUrl = RememberedNasTarget.source(prefs.getString("saved_source", ""), prefs.getString("saved_url", ""));
         String savedUser = prefs.getString("saved_user", "");
 
         if (!savedUrl.isEmpty()) {
@@ -116,7 +119,7 @@ public class LoginActivity extends FragmentActivity {
         } else {
             String httpUrl = normalizeUrl(input);
             tvStatus.setText("正在连接 " + input + "...");
-            doWebSocketLogin(httpUrl, user, pass);
+            doWebSocketLogin(httpUrl, input, user, pass);
         }
     }
 
@@ -142,7 +145,7 @@ public class LoginActivity extends FragmentActivity {
 
                 if (httpUrl != null) {
                     runOnUiThread(() -> tvStatus.setText("已找到可达地址: " + httpUrl.replace("http://", "")));
-                    doWebSocketLogin(httpUrl, user, pass);
+                    doWebSocketLogin(httpUrl, fnId, user, pass);
                 } else {
                     runOnUiThread(() -> {
                         progressBar.setVisibility(View.GONE);
@@ -167,16 +170,20 @@ public class LoginActivity extends FragmentActivity {
         return UrlUtils.normalizeUrl(input);
     }
 
-    private void doWebSocketLogin(String httpUrl, String user, String pass) {
-        wsClient = new FnWebSocketClient();
-        wsClient.startLogin(httpUrl, user, pass, new FnWebSocketClient.LoginCallback() {
+    private void doWebSocketLogin(String httpUrl, String source, String user, String pass) {
+        if (destroyed) return;
+        if (wsClient != null) wsClient.close();
+        final FnWebSocketClient client = new FnWebSocketClient();
+        wsClient = client;
+        client.startLogin(httpUrl, user, pass, new FnWebSocketClient.LoginCallback() {
             @Override
             public void onSuccess(JSONObject response) {
                 runOnUiThread(() -> {
+                    if (destroyed || isFinishing() || wsClient != client) return;
                     android.util.Log.d("FnWebSocket", "Login Successfully");
                     progressBar.setVisibility(View.GONE);
                     tvStatus.setVisibility(View.GONE);
-                    saveSession(httpUrl, user, pass, response);
+                    saveSession(httpUrl, source, user, pass, response);
                 });
             }
 
@@ -185,6 +192,7 @@ public class LoginActivity extends FragmentActivity {
                 runOnUiThread(() -> {
                     progressBar.setVisibility(View.GONE);
                     tvStatus.setVisibility(View.GONE);
+                    if (destroyed || wsClient != client) return;
                     Toast.makeText(LoginActivity.this, "登录失败: " + msg, Toast.LENGTH_LONG).show();
                 });
             }
@@ -195,6 +203,7 @@ public class LoginActivity extends FragmentActivity {
         editUrl.setText(url);
         editUser.setText(user);
         editPass.setText(pass);
+        cbRemember.setChecked(true);
 
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             progressBar.setVisibility(View.VISIBLE);
@@ -205,12 +214,12 @@ public class LoginActivity extends FragmentActivity {
                 resolveFnIdAndLogin(url, user, pass);
             } else {
                 String httpUrl = normalizeUrl(url);
-                doWebSocketLogin(httpUrl, user, pass);
+                doWebSocketLogin(httpUrl, url, user, pass);
             }
         }, 500);
     }
 
-    private void saveSession(String url, String user, String pass, JSONObject response) {
+    private void saveSession(String url, String source, String user, String pass, JSONObject response) {
         try {
             SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
             SharedPreferences.Editor editor = prefs.edit();
@@ -223,7 +232,8 @@ public class LoginActivity extends FragmentActivity {
                 saveUrl = "http://" + saveUrl;
             }
 
-            editor.putString("nas_url", saveUrl)
+            editor.putString("login_session", java.util.UUID.randomUUID().toString())
+                .putString("nas_url", saveUrl)
                 .putString("api_token", response.getString("token"))
                 .putString("secret", response.getString("secret"))
                 .putString("backId", response.getString("backId"));
@@ -231,21 +241,31 @@ public class LoginActivity extends FragmentActivity {
             if (cbRemember.isChecked()) {
                 editor.putBoolean("has_credentials", true)
                     .putString("saved_url", url)
+                    .putString("saved_source", source)
                     .putString("saved_user", user)
                     .putString("saved_pass", pass);
             } else {
                 editor.putBoolean("has_credentials", false)
                     .remove("saved_url")
+                    .remove("saved_source")
                     .remove("saved_user")
                     .remove("saved_pass");
             }
 
             editor.apply();
+            FnWebSocketClient.retainAuthenticatedSession(wsClient);
+            authenticated = true;
 
             startActivity(new Intent(this, MainActivity.class));
             finish();
         } catch (Exception e) {
             Toast.makeText(this, "保存会话失败", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    @Override protected void onDestroy() {
+        destroyed = true;
+        if (!authenticated && wsClient != null) wsClient.close();
+        super.onDestroy();
     }
 }

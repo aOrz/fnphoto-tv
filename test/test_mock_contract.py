@@ -28,6 +28,31 @@ def photos(count):
 
 
 class MockContractTests(unittest.TestCase):
+    def test_collect_form_is_idempotent_and_updates_detail_and_timeline(self):
+        sample = photos(2)
+        for photo in sample:
+            photo["isCollect"] = 0
+
+        class FormRequest:
+            content_type = "application/x-www-form-urlencoded"
+            def __init__(self, values): self.values = values
+            async def post(self): return self.values
+
+        with patch.object(server, "PHOTOS", sample), patch.object(server, "PHOTO_MAP", {p["id"]: p for p in sample}):
+            self.assertEqual(data(server.handle_timeline, is_collect=1)["list"], [])
+            for expected in (1, 1, 0):
+                response = asyncio.run(server.handle_toggle_collect(FormRequest({"id": "1", "collect": str(expected)})))
+                self.assertEqual(json.loads(response.text)["errno"], 0)
+                self.assertEqual(sample[1]["isCollect"], expected)
+                result = data(server.handle_collect_list, limit=100, offset=0)
+                self.assertEqual(result["count"], expected)
+                timeline = data(server.handle_timeline, is_collect=1)["list"]
+                self.assertEqual(sum(day["itemCount"] for day in timeline), expected)
+            for invalid in ({"id": "1", "collect": "2"}, {"type": "1"}, {"id": "bad", "collect": "1"}):
+                with self.assertRaises(web.HTTPBadRequest):
+                    asyncio.run(server.handle_toggle_collect(FormRequest(invalid)))
+            self.assertEqual(asyncio.run(server.handle_toggle_collect(FormRequest({"id": "999", "collect": "1"}))).status, 404)
+
     def test_album_offset_contract_full_traversal(self):
         for count in (0, 34, 35, 36, 100, 1000, 10000):
             with self.subTest(count=count), patch.object(server, "ALBUM_MAP", {9: {"photos": photos(count)}}):

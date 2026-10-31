@@ -229,7 +229,13 @@ public class MainActivity extends FragmentActivity {
 
     private void handleMenuSelection(MenuItem item) {
         Log.d(TAG, "Menu selected: " + item.getAction());
-        setModeText(item.getTitle());
+        // Unsupported actions and cancelled dialogs must not relabel the old content.
+        if (!"shared".equals(item.getAction()) && !"tags".equals(item.getAction())
+                && !"smart".equals(item.getAction()) && !"map".equals(item.getAction())
+                && !"media_types".equals(item.getAction()) && !"search".equals(item.getAction())
+                && !"settings".equals(item.getAction()) && !"logout".equals(item.getAction())) {
+            setModeText(item.getTitle());
+        }
         
         switch (item.getAction()) {
             case "gallery":
@@ -262,12 +268,27 @@ public class MainActivity extends FragmentActivity {
             case "logout":
                 logout();
                 return;
+            case "media_types":
+                drawerLayout.closeDrawer(GravityCompat.END);
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("媒体类型")
+                    .setItems(new String[]{"照片", "视频"}, (dialog, which) -> {
+                        MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                            .findFragmentById(R.id.main_content_container);
+                        if (fragment != null) {
+                            setModeText(which == 0 ? "照片" : "视频");
+                            fragment.loadMediaType(which == 0 ? "photo" : "video");
+                        }
+                    }).setNegativeButton("取消", null).show();
+                return;
             case "map":
             case "tags":
             case "smart":
-            case "media_types":
             case "shared":
-                Toast.makeText(this, "功能开发中: " + item.getTitle(), Toast.LENGTH_SHORT).show();
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle(item.getTitle())
+                    .setMessage("此功能尚未接入：当前缺少可验证的飞牛相册接口协议。需要对应 NAS 版本的接口文档或脱敏请求/响应样本，不能将其他列表冒充为此功能。")
+                    .setPositiveButton("知道了", null).show();
                 drawerLayout.closeDrawer(GravityCompat.END);
                 return;
         }
@@ -288,15 +309,18 @@ public class MainActivity extends FragmentActivity {
     }
     
     private void logout() {
+        com.fnphoto.tv.api.FnWebSocketClient.closeAuthenticatedSession();
         // 清除所有登录信息
         SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         prefs.edit()
             .remove("nas_url")
+            .remove("login_session")
             .remove("api_token")
             .remove("secret")
             .remove("backId")
             .remove("has_credentials")
             .remove("saved_url")
+            .remove("saved_source")
             .remove("saved_user")
             .remove("saved_pass")
             .apply();
@@ -376,7 +400,7 @@ public class MainActivity extends FragmentActivity {
                                   Response<FnHttpApi.AppVersionResponse> response) {
                 if (response.isSuccessful() && response.body() != null) {
                     FnHttpApi.AppVersionResponse result = response.body();
-                    if (result.errno == 0 && result.data != null) {
+                    if (result.isSuccessful() && result.data != null) {
                         Log.i(TAG, "========================================");
                         Log.i(TAG, "相册应用版本信息:");
                         Log.i(TAG, "  版本号: " + result.data.version);

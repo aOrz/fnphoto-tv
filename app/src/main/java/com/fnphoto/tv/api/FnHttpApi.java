@@ -365,8 +365,16 @@ public interface FnHttpApi {
      * 通用响应基类
      */
     class BaseResponse {
-        public int errno;      // 错误码，0表示成功
-        public String result;  // 结果状态: succ/fail
+        public int errno = Integer.MIN_VALUE; // Missing is not implicit success.
+        public Integer code;
+        public String result;  // Legacy result status: succ/fail.
+
+        public boolean isSuccessful() {
+            if (code != null && code != 0) return false;
+            if (errno != Integer.MIN_VALUE && errno != 0) return false;
+            if (result != null && !"succ".equals(result)) return false;
+            return code != null || errno == 0 || "succ".equals(result);
+        }
     }
     
     // 相册相关

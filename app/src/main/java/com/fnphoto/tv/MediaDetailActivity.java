@@ -69,6 +69,25 @@ public class MediaDetailActivity extends FragmentActivity {
     private MediaPageController pageController;
     private Call<FnHttpApi.PhotoDetailResponse> detailCall;
     private boolean reloadOnStart;
+    private Call<?> collectCall;
+    private boolean collectPending;
+    private DetailSessionStore sessionStore;
+    private String sessionId;
+    private String sessionOwner;
+    private String mediaSourceEndpoint;
+    private boolean restoredWithoutPaging;
+    private static final class RetainedDetail {
+        final MediaPageController controller;
+        final boolean restoredWithoutPaging;
+        final String owner;
+        final String sourceEndpoint;
+        RetainedDetail(MediaPageController controller, boolean restoredWithoutPaging, String owner, String sourceEndpoint) {
+            this.controller = controller;
+            this.restoredWithoutPaging = restoredWithoutPaging;
+            this.owner = owner;
+            this.sourceEndpoint = sourceEndpoint;
+        }
+    }
     private View infoOverlay;
     private TextView tvInfoContent;
     private TextView tvSlideshowIndicator;
@@ -104,20 +123,40 @@ public class MediaDetailActivity extends FragmentActivity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(container);
 
-        pageController = new MediaPageController(MediaListHolder.get(), MediaListHolder.getPageSource());
-        mediaList = pageController.getItems();
-        MediaListHolder.clear();
-        currentIndex = getIntent().getIntExtra("CURRENT_INDEX", 0);
-
-        if (mediaList == null || mediaList.isEmpty()) {
-            Toast.makeText(this, "没有可显示的媒体", Toast.LENGTH_SHORT).show();
-            finish();
-            return;
-        }
-
         SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         baseUrl = prefs.getString("nas_url", "");
         token = prefs.getString("api_token", "");
+        // Scope snapshots to the login session without writing credentials to the file.
+        sessionOwner = activeSessionOwner();
+        mediaSourceEndpoint = baseUrl;
+        sessionStore = new DetailSessionStore(getCacheDir());
+        sessionId = savedInstanceState != null ? savedInstanceState.getString("DETAIL_SESSION") : null;
+        RetainedDetail retained = (RetainedDetail) getLastCustomNonConfigurationInstance();
+        if (retained != null && sessionOwner.equals(retained.owner)) {
+            pageController = retained.controller;
+            restoredWithoutPaging = retained.restoredWithoutPaging;
+            mediaSourceEndpoint = retained.sourceEndpoint;
+        } else if (savedInstanceState != null) {
+            DetailSessionStore.Snapshot snapshot = sessionStore.read(sessionId, sessionOwner, baseUrl);
+            pageController = new MediaPageController(snapshot != null ? snapshot.items : null, null);
+            restoredWithoutPaging = snapshot != null && snapshot.hadMore;
+        } else {
+            pageController = new MediaPageController(MediaListHolder.get(), MediaListHolder.getPageSource());
+            MediaListHolder.clear();
+        }
+        if (retained != null && !sessionOwner.equals(retained.owner)) retained.controller.close();
+        if (sessionId == null) sessionId = sessionStore.newId();
+        mediaList = pageController.getItems();
+        currentIndex = savedInstanceState != null ? savedInstanceState.getInt("DETAIL_INDEX", 0)
+                : getIntent().getIntExtra("CURRENT_INDEX", 0);
+        if (mediaList.isEmpty()) {
+            Toast.makeText(this, "浏览会话已过期，请返回列表重新打开", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+        currentIndex = Math.max(0, Math.min(currentIndex, mediaList.size() - 1));
+        if (restoredWithoutPaging) Toast.makeText(this,
+                "已恢复已加载照片；更多照片请返回列表加载", Toast.LENGTH_LONG).show();
 
         if (baseUrl != null && !baseUrl.isEmpty()) {
             Retrofit retrofit = new Retrofit.Builder()
@@ -308,7 +347,10 @@ public class MediaDetailActivity extends FragmentActivity {
         if (slideshowActive) showSlideshowIndicator(true);
 
         String videoId = item.getId();
-        String videoUrl = baseUrl + "/p/api/v1/stream/v/" + videoId;
+        SharedPreferences currentPrefs = getSharedPreferences("fn_photo_prefs", MODE_PRIVATE);
+        String currentEndpoint = currentPrefs.getString("nas_url", baseUrl);
+        token = currentPrefs.getString("api_token", "");
+        String videoUrl = currentEndpoint + "/p/api/v1/stream/v/" + videoId;
         Log.d(TAG, "Playing video: " + videoUrl);
 
         if (!tryExoPlayer(videoUrl)) {
@@ -735,70 +777,65 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void toggleCollect() {
-        MediaItem item = mediaList.get(currentIndex);
-        if (!"photo".equals(item.getType()) && !"video".equals(item.getType())) {
-            Toast.makeText(this, "只能收藏照片或视频", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        if (api == null || token == null || baseUrl == null) {
-            Toast.makeText(this, "API未初始化", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        int photoId;
-        try {
-            photoId = Integer.parseInt(item.getId());
-        } catch (NumberFormatException e) {
-            Toast.makeText(this, "无法获取媒体ID", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/collect", "POST", "id=" + photoId + "&collect=1");
-        String body = "id=" + photoId + "&collect=1";
-
-        api.toggleCollect(token, authx, photoId, 1).enqueue(new Callback<FnHttpApi.BaseResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.BaseResponse> call,
-                                   Response<FnHttpApi.BaseResponse> response) {
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.BaseResponse result = response.body();
-                    if (result.errno == 0) {
-                        Toast.makeText(MediaDetailActivity.this,
-                                "已收藏 ❤️", Toast.LENGTH_SHORT).show();
-                    } else {
-                        // Try to un-collect
-                        toggleUnCollect(photoId);
-                    }
+        if (collectPending || api == null || mediaList == null || mediaList.isEmpty()) return;
+        final MediaItem item = mediaList.get(currentIndex);
+        final int photoId;
+        try { photoId = Integer.parseInt(item.getId()); }
+        catch (NumberFormatException e) { collectFailed("无法获取媒体ID"); return; }
+        collectPending = true;
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/detail/" + photoId, "GET", null);
+        Call<FnHttpApi.PhotoDetailResponse> read = api.getPhotoDetail(token, authx, photoId);
+        collectCall = read;
+        read.enqueue(new Callback<FnHttpApi.PhotoDetailResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.PhotoDetailResponse> call,
+                    Response<FnHttpApi.PhotoDetailResponse> response) {
+                if (call.isCanceled()) return;
+                FnHttpApi.PhotoDetailResponse body = response.body();
+                if (!response.isSuccessful() || body == null || body.code != 0 || body.data == null
+                        || body.data.info == null || body.data.info.id != photoId) {
+                    collectFailed("读取收藏状态失败，请重试");
+                    return;
                 }
+                int target = CollectState.target(body.data.info.isCollect);
+                if (target < 0) { collectFailed("收藏状态无效，请重试"); return; }
+                writeCollect(photoId, target);
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.BaseResponse> call, Throwable t) {
-                Log.e(TAG, "收藏失败", t);
-                Toast.makeText(MediaDetailActivity.this, "收藏失败", Toast.LENGTH_SHORT).show();
+            @Override public void onFailure(Call<FnHttpApi.PhotoDetailResponse> call, Throwable t) {
+                if (!call.isCanceled()) collectFailed("读取收藏状态失败，请重试");
             }
         });
     }
 
-    private void toggleUnCollect(int photoId) {
-        String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/collect", "POST", "id=" + photoId + "&collect=0");
-
-        api.toggleCollect(token, authx, photoId, 0).enqueue(new Callback<FnHttpApi.BaseResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.BaseResponse> call,
-                                   Response<FnHttpApi.BaseResponse> response) {
-                if (response.isSuccessful()) {
-                    Toast.makeText(MediaDetailActivity.this,
-                            "已取消收藏 ♡", Toast.LENGTH_SHORT).show();
+    private void writeCollect(int photoId, final int target) {
+        String body = "id=" + photoId + "&collect=" + target;
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/collect", "POST", body);
+        Call<FnHttpApi.BaseResponse> write = api.toggleCollect(token, authx, photoId, target);
+        collectCall = write;
+        write.enqueue(new Callback<FnHttpApi.BaseResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.BaseResponse> call,
+                    Response<FnHttpApi.BaseResponse> response) {
+                if (call.isCanceled()) return;
+                if (!response.isSuccessful() || response.body() == null || !response.body().isSuccessful()) {
+                    collectFailed("更新收藏失败，请重试");
+                    return;
                 }
+                collectPending = false;
+                collectCall = null;
+                SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", MODE_PRIVATE);
+                prefs.edit().putLong("collect_revision", prefs.getLong("collect_revision", 0L) + 1L).apply();
+                Toast.makeText(MediaDetailActivity.this,
+                        target == 1 ? "已收藏 ❤️" : "已取消收藏 ♡", Toast.LENGTH_SHORT).show();
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.BaseResponse> call, Throwable t) {
-                Log.e(TAG, "取消收藏失败", t);
+            @Override public void onFailure(Call<FnHttpApi.BaseResponse> call, Throwable t) {
+                if (!call.isCanceled()) collectFailed("更新收藏失败，请重试");
             }
         });
+    }
+
+    private void collectFailed(String message) {
+        collectPending = false;
+        collectCall = null;
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
     private String nullToStr(String str) {
@@ -899,6 +936,45 @@ public class MediaDetailActivity extends FragmentActivity {
         }
     }
 
+    private static String sessionOwner(String url, String token) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest((url + "\n" + token).getBytes("UTF-8"));
+            StringBuilder hex = new StringBuilder();
+            for (byte value : digest) hex.append(String.format(Locale.US, "%02x", value & 255));
+            return hex.toString();
+        } catch (Exception e) { throw new IllegalStateException(e); }
+    }
+
+    private String activeSessionOwner() {
+        SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", MODE_PRIVATE);
+        String source = prefs.getString("saved_source", "");
+        if (source.isEmpty()) source = prefs.getString("nas_url", baseUrl);
+        return sessionOwner(source, prefs.getString("login_session", prefs.getString("api_token", "")));
+    }
+
+    @Override public Object onRetainCustomNonConfigurationInstance() {
+        return pageController != null ? new RetainedDetail(pageController, restoredWithoutPaging, sessionOwner, mediaSourceEndpoint) : null;
+    }
+
+    @Override protected void onSaveInstanceState(Bundle outState) {
+        outState.putInt("DETAIL_INDEX", currentIndex);
+        if (sessionStore != null && mediaList != null && !mediaList.isEmpty()) {
+            try {
+                if (!sessionOwner.equals(activeSessionOwner())) {
+                    sessionStore.delete(sessionId);
+                    super.onSaveInstanceState(outState);
+                    return;
+                }
+                sessionStore.save(sessionId, sessionOwner, mediaList,
+                        restoredWithoutPaging || pageController.hasMore(), mediaSourceEndpoint);
+                outState.putString("DETAIL_SESSION", sessionId);
+                outState.putInt("DETAIL_INDEX", currentIndex);
+            } catch (java.io.IOException e) { Log.w(TAG, "Cannot save detail session", e); }
+        }
+        super.onSaveInstanceState(outState);
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
@@ -910,6 +986,9 @@ public class MediaDetailActivity extends FragmentActivity {
 
     @Override
     protected void onStop() {
+        if (collectCall != null) collectCall.cancel();
+        collectCall = null;
+        collectPending = false;
         loadState.next();
         navigationState.next();
         clearImageRequests();
@@ -926,7 +1005,8 @@ public class MediaDetailActivity extends FragmentActivity {
     protected void onDestroy() {
         loadState.close();
         navigationState.close();
-        if (pageController != null) pageController.close();
+        if (pageController != null && !isChangingConfigurations()) pageController.close();
+        if (isFinishing() && sessionStore != null) sessionStore.delete(sessionId);
         clearImageRequests();
         releasePlayers();
         slideshowHandler.removeCallbacksAndMessages(null);

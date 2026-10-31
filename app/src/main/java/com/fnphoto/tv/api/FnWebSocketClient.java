@@ -10,6 +10,29 @@ public class FnWebSocketClient {
     private WebSocket mainWs;
     private String serverUrl;
     private String currentSi;
+    private volatile boolean closed;
+    private static FnWebSocketClient authenticatedSession;
+
+    // Preserve the existing NAS keepalive semantics, but retain at most one
+    // authenticated websocket rather than leaking one heartbeat per token refresh.
+    public static synchronized void retainAuthenticatedSession(FnWebSocketClient session) {
+        if (authenticatedSession != null && authenticatedSession != session) authenticatedSession.close();
+        authenticatedSession = session;
+    }
+
+    public static synchronized void closeAuthenticatedSession() {
+        if (authenticatedSession != null) authenticatedSession.close();
+        authenticatedSession = null;
+    }
+    private android.os.Handler keepaliveHandler;
+    private Runnable keepalive;
+
+    public synchronized void close() {
+        closed = true;
+        if (keepaliveHandler != null && keepalive != null) keepaliveHandler.removeCallbacks(keepalive);
+        keepalive = null;
+        if (mainWs != null) mainWs.cancel();
+    }
     
     public FnWebSocketClient() {
         // 延迟初始化 OkHttpClient，捕获可能的异常
@@ -49,6 +72,7 @@ public class FnWebSocketClient {
             mainWs = client.newWebSocket(request, new WebSocketListener() {
             @Override
             public void onOpen(WebSocket webSocket, Response response) {
+                if (closed) { webSocket.cancel(); return; }
                 android.util.Log.d("FnWebSocket", "Connection opened, requesting RSA key");
                 // Start keepalive ping every 10 seconds to prevent timeout
                 startKeepalive(webSocket);
@@ -56,22 +80,25 @@ public class FnWebSocketClient {
             }
             
             private void startKeepalive(final WebSocket ws) {
-                final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
-                final Runnable pingRunnable = new Runnable() {
-                    @Override
-                    public void run() {
-                        if (ws != null) {
-                            ws.send("{\"req\":\"ping\"}");
-//                            android.util.Log.d("FnWebSocket", "send ping");
-                            handler.postDelayed(this, 10000);
+                synchronized (FnWebSocketClient.this) {
+                    if (closed) return;
+                    keepaliveHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+                    keepalive = new Runnable() {
+                        @Override public void run() {
+                            synchronized (FnWebSocketClient.this) {
+                                if (closed) return;
+                                ws.send("{\"req\":\"ping\"}");
+                                keepaliveHandler.postDelayed(this, 10000);
+                            }
                         }
-                    }
-                };
-                handler.postDelayed(pingRunnable, 10000);
+                    };
+                    keepaliveHandler.postDelayed(keepalive, 10000);
+                }
             }
 
             @Override
             public void onMessage(WebSocket webSocket, String text) {
+                if (closed) return;
                 // android.util.Log.d("FnWebSocket", "Received: " + text);
                 try {
                     JSONObject json = new JSONObject(text);
@@ -94,21 +121,26 @@ public class FnWebSocketClient {
                         String result = json.optString("result");
                         android.util.Log.e("FnWebSocket", "Server error: errno=" + errno + ", result=" + result);
                         callback.onError("Server error " + errno + ": " + result);
+                        close();
                     }
                 } catch (Exception e) {
                     android.util.Log.e("FnWebSocket", "Error processing message: " + e.getMessage(), e);
-                    callback.onError(e.getMessage());
+                    if (!closed) callback.onError(e.getMessage());
+                    close();
                 }
             }
 
             @Override
             public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                if (closed) return;
+                close();
                 android.util.Log.e("FnWebSocket", "Connection failed: " + t.getMessage(), t);
                 callback.onError("Connection failed: " + t.getMessage());
             }
 
             @Override
             public void onClosing(WebSocket webSocket, int code, String reason) {
+                if (!closed) { close(); callback.onError("Connection closed before login completed"); }
                 android.util.Log.w("FnWebSocket", "Closing: " + code + " - " + reason);
             }
 
@@ -121,6 +153,7 @@ public class FnWebSocketClient {
         } catch (Exception e) {
             android.util.Log.e("FnWebSocket", "Failed to create WebSocket: " + e.getMessage(), e);
             callback.onError("Failed to create WebSocket: " + e.getMessage());
+            close();
         }
     }
 
@@ -188,6 +221,7 @@ public class FnWebSocketClient {
                     new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
                         @Override
                         public void run() {
+                            if (closed) return;
                             boolean sent = ws.send(finalPayload);
                             android.util.Log.d("FnWebSocket", "Login sent: " + sent);
                         }
@@ -198,7 +232,8 @@ public class FnWebSocketClient {
                     new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
                         @Override
                         public void run() {
-                            callback.onError("Encryption failed: " + e.getMessage());
+                            if (!closed) callback.onError("Encryption failed: " + e.getMessage());
+                            close();
                         }
                     });
                 }

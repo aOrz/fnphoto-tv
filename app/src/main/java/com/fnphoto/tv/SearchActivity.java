@@ -115,7 +115,9 @@ public class SearchActivity extends FragmentActivity {
         tvTitle.setTextColor(Color.parseColor("#F2F4F8"));
         tvTitle.setTextSize(34);
         tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tvTitle.setLetterSpacing(0.01f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            tvTitle.setLetterSpacing(0.01f);
+        }
         tvTitle.setPadding(dp(64), dp(40), dp(64), 0);
         rootLayout.addView(tvTitle);
 
