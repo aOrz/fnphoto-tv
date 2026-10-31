@@ -25,7 +25,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -38,7 +40,35 @@ import retrofit2.converter.gson.GsonConverterFactory;
 public class MainFragment extends BrowseSupportFragment {
     private static final String TAG = "MainFragment";
     private static final int PREVIEW_LOAD_DELAY = 300; // 延迟加载时间
-    private static final int VISIBLE_RANGE_BUFFER = 40; // 可视范围前后的缓冲数量
+    private static final int VISIBLE_RANGE_BUFFER = 6; // 可视范围前后的缓冲数量
+
+    private static final int PAGE_SIZE = 60;
+    private static final int PHOTO_PAGE_SIZE = 35; // Preserve the NAS album endpoint's existing page size.
+    private static final int PREFETCH_DISTANCE = 12;
+    private static final int MAX_PREVIEW_REQUESTS = 2;
+    private final MainRequestScope requests = new MainRequestScope();
+    private final Set<Integer> pendingPreviewIndexes = new HashSet<>();
+    private final Set<Integer> pendingPersonPreviewIndexes = new HashSet<>();
+    private final Map<Integer, Long> previewRetryAfter = new HashMap<>();
+    private final Map<Integer, Long> personPreviewRetryAfter = new HashMap<>();
+    private final Map<MediaItem, ArrayObjectAdapter> previewRows = new IdentityHashMap<>();
+    private int previewRequests;
+    private int previewScreen; // 0: inactive, 1: timeline, 2: person timeline
+    private MainPagingState photoPaging;
+    private MainPagingState albumPaging;
+    private boolean albumDirectory;
+    private int savedAlbumSelection = -1;
+    private String photoMode;
+    private String photoDate;
+    private int photoAlbumId;
+    private int photoPersonId;
+    private String pagedTitle;
+    private ArrayObjectAdapter pagedLastRow;
+    private ArrayObjectAdapter pageFooterAdapter;
+    private ListRow pageFooter;
+    private final Map<String, Integer> photoPositions = new HashMap<>();
+    private final Map<String, Integer> albumPositions = new HashMap<>();
+    private MediaListHolder.PageCallback detailPageCallback;
 
     private FnHttpApi api;
     private String token;
@@ -58,7 +88,11 @@ public class MainFragment extends BrowseSupportFragment {
     private int lastVisibleIndex = -1;
     
     // 预览缩略图缓存（按日期字符串缓存，避免返回时重新加载）
-    private Map<String, List<String>> previewThumbnailCache = new HashMap<>();
+    private Map<String, List<String>> previewThumbnailCache = new LinkedHashMap<String, List<String>>(64, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, List<String>> eldest) {
+            return size() > 512;
+        }
+    };
 
     // 保存滚动位置
     private int savedTimelinePosition = -1;  // 保存时间线的选中位置
@@ -113,6 +147,80 @@ public class MainFragment extends BrowseSupportFragment {
         prefs.registerOnSharedPreferenceChangeListener(tokenChangeListener);
     }
 
+    private void beginScreen() {
+        requests.next();
+        lazyLoadHandler.removeCallbacksAndMessages(null);
+        positionHandler.removeCallbacksAndMessages(null);
+        pendingPreviewIndexes.clear();
+        pendingPersonPreviewIndexes.clear();
+        previewRetryAfter.clear();
+        personPreviewRetryAfter.clear();
+        previewRows.clear();
+        previewRequests = 0;
+        previewScreen = 0;
+        if (photoPaging != null) photoPaging.cancel();
+        if (albumPaging != null) albumPaging.cancel();
+        photoPaging = null;
+        albumDirectory = false;
+        pagedLastRow = null;
+        pageFooter = null;
+        pageFooterAdapter = null;
+        if (detailPageCallback != null) {
+            MediaListHolder.PageCallback callback = detailPageCallback;
+            detailPageCallback = null;
+            callback.onFailure();
+        }
+        hideLoadingOverlay();
+    }
+
+    private void beginRootScreen() {
+        beginScreen();
+        timelineItems = null;
+        currentMediaList = null;
+        albumPaging = null;
+        photoPositions.clear();
+        albumPositions.clear();
+        allDateItems.clear();
+        allTimelineItems.clear();
+        personDateItems.clear();
+        personTimelineItemsList.clear();
+        loadedIndexes.clear();
+        personLoadedIdx.clear();
+        savedAlbumList = null;
+        savedPlacesList = null;
+        savedPersonList = null;
+        savedPersonTimelineItems = null;
+        currentPersonId = -1;
+        currentPersonName = null;
+        savedAlbumSelection = -1;
+        savedTimelinePosition = -1;
+        savedPhotoListPosition = -1;
+        isPhotoListView = false;
+        mRowsAdapter.clear();
+    }
+
+    private <T> void enqueue(Call<T> call, final Callback<T> callback) {
+        final long generation = requests.generation();
+        requests.track(call, call::cancel);
+        call.enqueue(new Callback<T>() {
+            @Override public void onResponse(Call<T> completed, Response<T> response) {
+                if (requests.complete(completed, generation) && !completed.isCanceled()) {
+                    callback.onResponse(completed, response);
+                }
+            }
+            @Override public void onFailure(Call<T> completed, Throwable error) {
+                if (requests.complete(completed, generation) && !completed.isCanceled()) {
+                    callback.onFailure(completed, error);
+                }
+            }
+        });
+    }
+
+    private String absoluteUrl(String url) {
+        return url == null || url.isEmpty() ? null :
+                (url.startsWith("http://") || url.startsWith("https://") ? url : baseUrl + url);
+    }
+
     private void setupUI() {
         setTitle("");
         setHeadersState(BrowseSupportFragment.HEADERS_DISABLED);
@@ -132,7 +240,10 @@ public class MainFragment extends BrowseSupportFragment {
                 if (item instanceof MediaItem) {
                     MediaItem mediaItem = (MediaItem) item;
                     
-                    if ("date".equals(mediaItem.getType())) {
+                    if ("page_action".equals(mediaItem.getType())) {
+                        if (photoPaging != null) loadPhotoPage();
+                        else if (albumDirectory) loadAlbumPage();
+                    } else if ("date".equals(mediaItem.getType())) {
                         loadPhotosByDate(mediaItem.getDateStr(), mediaItem.getPhotoCount());
                     } else if ("person_date".equals(mediaItem.getType())) {
                         loadPersonPhotosByDate(mediaItem.getDateStr(), mediaItem.getPhotoCount());
@@ -159,7 +270,15 @@ public class MainFragment extends BrowseSupportFragment {
                                        RowPresenter.ViewHolder rowViewHolder, Row row) {
                 if (item instanceof MediaItem) {
                     MediaItem mi = (MediaItem) item;
-                    if ("date".equals(mi.getType())) {
+                    if (photoPaging != null && ("photo".equals(mi.getType()) || "video".equals(mi.getType()))) {
+                        Integer index = photoPositions.get(mi.getId());
+                        if (index != null && index >= currentMediaList.size() - PREFETCH_DISTANCE
+                                && !photoPaging.hasFailed()) loadPhotoPage();
+                    } else if (albumDirectory && "album".equals(mi.getType())) {
+                        Integer index = albumPositions.get(mi.getId());
+                        if (index != null && index >= savedAlbumList.size() - PREFETCH_DISTANCE
+                                && !albumPaging.hasFailed()) loadAlbumPage();
+                    } else if ("date".equals(mi.getType())) {
                         int selectedIndex = allDateItems.indexOf(item);
                         if (selectedIndex >= 0) {
                             scheduleLazyLoad(selectedIndex);
@@ -191,52 +310,51 @@ public class MainFragment extends BrowseSupportFragment {
     }
     
     private void loadVisiblePreviews(int centerIndex) {
-        if (allDateItems.isEmpty() || allTimelineItems.isEmpty()) return;
-        
+        if (previewScreen != 1 || isPhotoListView || allDateItems.isEmpty() || allTimelineItems.isEmpty()) return;
+        lastVisibleIndex = centerIndex;
         int start = Math.max(0, centerIndex - VISIBLE_RANGE_BUFFER);
         int end = Math.min(allDateItems.size(), centerIndex + VISIBLE_RANGE_BUFFER + 1);
-        
-        Log.d(TAG, "Loading previews for visible range: " + start + " to " + end);
-        
-        for (int i = start; i < end; i++) {
-            if (!loadedIndexes.contains(i)) {
-                loadedIndexes.add(i);
-                final int index = i;
-                final MediaItem mediaItem = allDateItems.get(i);
-                final FnHttpApi.TimelineItem timelineItem = allTimelineItems.get(i);
-                
-                if (timelineItem.itemCount > 0) {
-                    // 如果已有缓存的预览缩略图，直接通知更新，无需重新请求
-                    if (mediaItem.getPreviewThumbUrls() != null && !mediaItem.getPreviewThumbUrls().isEmpty()) {
-                        Log.d(TAG, "Using cached preview for " + mediaItem.getDateStr());
-                        notifyItemChanged(mediaItem);
+        // Nearest items first; only two metadata requests compete with visible Glide images.
+        for (int distance = 0; distance <= VISIBLE_RANGE_BUFFER; distance++) {
+            for (int side = 0; side < (distance == 0 ? 1 : 2); side++) {
+                final int index = centerIndex + (side == 0 ? distance : -distance);
+                if (index < start || index >= end || loadedIndexes.contains(index)
+                        || pendingPreviewIndexes.contains(index)) continue;
+                Long retryAfter = previewRetryAfter.get(index);
+                if (retryAfter != null && retryAfter > android.os.SystemClock.uptimeMillis()) continue;
+                final MediaItem item = allDateItems.get(index);
+                if (item.getPreviewThumbUrls() != null) {
+                    loadedIndexes.add(index);
+                    continue;
+                }
+                if (previewRequests >= MAX_PREVIEW_REQUESTS) return;
+                pendingPreviewIndexes.add(index);
+                previewRequests++;
+                loadDatePreviewThumbnails(item, allTimelineItems.get(index), () -> {
+                    previewRequests--;
+                    pendingPreviewIndexes.remove(index);
+                    if (item.getPreviewThumbUrls() != null) {
+                        loadedIndexes.add(index);
+                        notifyItemChanged(item);
                     } else {
-                        loadDatePreviewThumbnails(mediaItem, timelineItem, () -> {
-                            notifyItemChanged(mediaItem);
-                        });
+                        previewRetryAfter.put(index, android.os.SystemClock.uptimeMillis() + 3000);
                     }
-                }
-            }
-        }
-    }
-    
-    private void notifyItemChanged(MediaItem item) {
-        // 遍历所有行，找到并更新对应的项
-        for (int i = 0; i < mRowsAdapter.size(); i++) {
-            Object row = mRowsAdapter.get(i);
-            if (row instanceof ListRow) {
-                ArrayObjectAdapter rowAdapter = (ArrayObjectAdapter) ((ListRow) row).getAdapter();
-                int itemIndex = rowAdapter.indexOf(item);
-                if (itemIndex >= 0) {
-                    rowAdapter.notifyItemRangeChanged(itemIndex, 1);
-                    break;
-                }
+                    loadVisiblePreviews(lastVisibleIndex);
+                });
             }
         }
     }
 
+    private void notifyItemChanged(MediaItem item) {
+        ArrayObjectAdapter row = previewRows.get(item);
+        if (row == null) return;
+        int index = row.indexOf(item);
+        if (index >= 0) row.notifyItemRangeChanged(index, 1);
+    }
+
     public boolean onBackPressed() {
         if (isPhotoListView) {
+            beginScreen();
             if (timelineItems != null) {
                 Log.d(TAG, "Returning to timeline");
                 savePhotoListPosition();
@@ -250,11 +368,16 @@ public class MainFragment extends BrowseSupportFragment {
             } else if (savedPersonTimelineItems != null) {
                 Log.d(TAG, "Returning to person timeline");
                 displayPersonTimeline(savedPersonTimelineItems);
+            } else if (currentPersonId > 0 && savedPersonList != null) {
+                currentPersonId = -1;
+                currentPersonName = null;
+                displayPeople(savedPersonList);
             } else {
                 return false;
             }
             return true;
         } else if (currentPersonId > 0) {
+            beginScreen();
             Log.d(TAG, "Returning from person timeline to person list");
             currentPersonId = -1;
             currentPersonName = null;
@@ -295,37 +418,24 @@ public class MainFragment extends BrowseSupportFragment {
     }
     
     private void restoreTimelinePosition() {
-        Log.d(TAG, "restoreTimelinePosition called, saved position: " + savedTimelinePosition + ", total items: " + allDateItems.size());
-        if (savedTimelinePosition >= 0 && savedTimelinePosition < allDateItems.size()) {
-            // 使用独立的 Handler，避免被 lazyLoadHandler 清空
-            positionHandler.postDelayed(() -> {
-                try {
-                    // 找到该日期项所在的行
-                    MediaItem targetItem = allDateItems.get(savedTimelinePosition);
-                    Log.d(TAG, "Looking for item: " + targetItem.getId() + " at position " + savedTimelinePosition);
-                    
-                    for (int rowIdx = 0; rowIdx < mRowsAdapter.size(); rowIdx++) {
-                        Object row = mRowsAdapter.get(rowIdx);
-                        if (row instanceof ListRow) {
-                            ArrayObjectAdapter rowAdapter = (ArrayObjectAdapter) ((ListRow) row).getAdapter();
-                            int itemIdx = rowAdapter.indexOf(targetItem);
-                            Log.d(TAG, "Row " + rowIdx + ": item index = " + itemIdx);
-                            
-                            if (itemIdx >= 0) {
-                                // 找到行，选中它
-                                setSelectedPosition(rowIdx);
-                                Log.d(TAG, "Restored timeline position - row: " + rowIdx + ", item index: " + savedTimelinePosition);
-                                break;
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "Error restoring timeline position", e);
+        restorePreviewPosition(allDateItems, savedTimelinePosition);
+    }
+
+    private void restorePreviewPosition(List<MediaItem> items, int position) {
+        if (position < 0 || position >= items.size()) return;
+        MediaItem target = items.get(position);
+        positionHandler.post(() -> {
+            ArrayObjectAdapter adapter = previewRows.get(target);
+            if (adapter == null) return;
+            for (int row = 0; row < mRowsAdapter.size(); row++) {
+                Object value = mRowsAdapter.get(row);
+                if (value instanceof ListRow && ((ListRow) value).getAdapter() == adapter) {
+                    setSelectedPosition(row, false,
+                            new ListRowPresenter.SelectItemViewHolderTask(adapter.indexOf(target)));
+                    return;
                 }
-            }, 800); // 延迟800ms等待视图准备好
-        } else {
-            Log.w(TAG, "Invalid saved timeline position: " + savedTimelinePosition);
-        }
+            }
+        });
     }
 
     public void loadTimeline() {
@@ -334,10 +444,11 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", null);
 
-        api.getTimeline(token, authx, null).enqueue(new Callback<FnHttpApi.TimelineResponse>() {
+        enqueue(api.getTimeline(token, authx, null), new Callback<FnHttpApi.TimelineResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.TimelineResponse> call, 
                                    Response<FnHttpApi.TimelineResponse> response) {
@@ -359,6 +470,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void displayTimeline(List<FnHttpApi.TimelineItem> items) {
+        previewScreen = 1;
         timelineItems = items;
         isPhotoListView = false;
         allDateItems.clear();
@@ -391,6 +503,7 @@ public class MainFragment extends BrowseSupportFragment {
                 mediaItem.setPreviewThumbUrls(previewThumbnailCache.get(dateStr));
             }
             currentRowAdapter.add(mediaItem);
+            previewRows.put(mediaItem, currentRowAdapter);
             allDateItems.add(mediaItem);
             allTimelineItems.add(item);
         }
@@ -410,6 +523,7 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载文件夹...");
         Boolean desc = false;
         Integer orderBy = 2;
@@ -421,7 +535,7 @@ public class MainFragment extends BrowseSupportFragment {
 
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/folder/list", "GET", params);
 
-        api.getManagedFolders(token, authx, desc, orderBy).enqueue(new Callback<FnHttpApi.FolderListResponse>() {
+        enqueue(api.getManagedFolders(token, authx, desc, orderBy), new Callback<FnHttpApi.FolderListResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.FolderListResponse> call,
                                    Response<FnHttpApi.FolderListResponse> response) {
@@ -496,81 +610,78 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     public void loadAlbums() {
-        if (api == null || token == null || token.isEmpty()) {
-            Log.e(TAG, "API未初始化");
-            return;
-        }
-
-        showLoadingOverlay("正在加载相册...");
-        String params = "sort_direction=desc&sort_by=date_time&offset=0&limit=1000";
-        String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/list", "GET", params);
-
-        api.getAlbums(token, authx, "desc", "date_time", 0, 1000).enqueue(new Callback<FnHttpApi.AlbumListResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.AlbumListResponse> call,
-                                   Response<FnHttpApi.AlbumListResponse> response) {
-                hideLoadingOverlay();
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.AlbumListResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        displayAlbums(result.data.list);
-                    }
-                }
-            }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.AlbumListResponse> call, Throwable t) {
-                Log.e(TAG, "加载相册失败", t);
-                hideLoadingOverlay();
-            }
-        });
+        if (api == null || token == null || token.isEmpty()) return;
+        beginRootScreen();
+        albumPaging = new MainPagingState(PAGE_SIZE);
+        savedAlbumList = new ArrayList<>();
+        displayAlbums(savedAlbumList);
+        loadAlbumPage();
     }
 
     private void displayAlbums(List<FnHttpApi.NewAlbum> albums) {
         savedAlbumList = new ArrayList<>(albums);
+        albumDirectory = true;
         isPhotoListView = false;
         timelineItems = null;
+        pagedTitle = "相册";
         mRowsAdapter.clear();
-        
-        int itemsPerRow = 6;
-        int totalRows = (int) Math.ceil((double) albums.size() / itemsPerRow);
-
-        for (int row = 0; row < totalRows; row++) {
-            int start = row * itemsPerRow;
-            int end = Math.min(start + itemsPerRow, albums.size());
-
-            HeaderItem header = row == 0 ? new HeaderItem("相册 (" + albums.size() + ")") : null;
-            ArrayObjectAdapter rowAdapter = new ArrayObjectAdapter(mCardPresenter);
-
-            for (int i = start; i < end; i++) {
-                FnHttpApi.NewAlbum album = albums.get(i);
-                String posterUrl = album.posterUrl != null ? baseUrl + album.posterUrl : null;
-                MediaItem item = new MediaItem(
-                    String.valueOf(album.albumId),
-                    album.albumName,
-                    "album",
-                    posterUrl,
-                    posterUrl
-                );
-                int totalCount = album.photoCount + album.videoCount;
-                if (totalCount > 0) {
-                    StringBuilder countInfo = new StringBuilder();
-                    if (album.photoCount > 0) {
-                        countInfo.append(album.photoCount).append("张照片");
-                    }
-                    if (album.videoCount > 0) {
-                        if (countInfo.length() > 0) {
-                            countInfo.append(" · ");
-                        }
-                        countInfo.append(album.videoCount).append("个视频");
-                    }
-                    item.setDateStr(countInfo.toString());
-                }
-                rowAdapter.add(item);
-            }
-
-            mRowsAdapter.add(new ListRow(header, rowAdapter));
+        pagedLastRow = null;
+        pageFooter = null;
+        pageFooterAdapter = null;
+        albumPositions.clear();
+        for (int i = 0; i < albums.size(); i++) appendAlbumCard(albums.get(i), i);
+        updatePageFooter(albumPaging, savedAlbumList.size());
+        if (savedAlbumSelection >= 0 && savedAlbumSelection < albums.size()) {
+            final int position = savedAlbumSelection;
+            positionHandler.post(() -> setSelectedPosition(position / 6, false,
+                    new ListRowPresenter.SelectItemViewHolderTask(position % 6)));
         }
+    }
+
+    private void appendAlbumCard(FnHttpApi.NewAlbum album, int position) {
+        String posterUrl = absoluteUrl(album.posterUrl != null ? album.posterUrl : album.posterImgUrl);
+        MediaItem item = new MediaItem(String.valueOf(album.albumId), album.albumName,
+                "album", posterUrl, posterUrl);
+        item.setDateStr(album.photoCount + "张照片 · " + album.videoCount + "个视频");
+        albumPositions.put(item.getId(), position);
+        appendPagedCard(item, position);
+    }
+
+    private void loadAlbumPage() {
+        if (!albumDirectory || albumPaging == null) return;
+        final int offset = albumPaging.begin();
+        if (offset < 0) return;
+        updatePageFooter(albumPaging, savedAlbumList.size());
+        String params = "sort_direction=desc&sort_by=date_time&offset=" + offset + "&limit=" + PAGE_SIZE;
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/list", "GET", params);
+        enqueue(api.getAlbums(token, authx, "desc", "date_time", offset, PAGE_SIZE),
+                new Callback<FnHttpApi.AlbumListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.AlbumListResponse> call,
+                    Response<FnHttpApi.AlbumListResponse> response) {
+                FnHttpApi.AlbumListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    albumPaging.fail();
+                } else {
+                    List<String> ids = new ArrayList<>();
+                    for (FnHttpApi.NewAlbum album : result.data.list) ids.add(String.valueOf(album.albumId));
+                    for (int index : albumPaging.accept(ids, null)) {
+                        FnHttpApi.NewAlbum album = result.data.list.get(index);
+                        int position = savedAlbumList.size();
+                        savedAlbumList.add(album);
+                        appendAlbumCard(album, position);
+                    }
+                }
+                updatePageFooter(albumPaging, savedAlbumList.size());
+                if (offset == 0 && !savedAlbumList.isEmpty()) {
+                    positionHandler.post(() -> setSelectedPosition(0));
+                }
+            }
+            @Override public void onFailure(Call<FnHttpApi.AlbumListResponse> call, Throwable error) {
+                albumPaging.fail();
+                updatePageFooter(albumPaging, savedAlbumList.size());
+            }
+        });
     }
 
     private void loadDatePreviewThumbnails(final MediaItem mediaItem, 
@@ -601,8 +712,7 @@ public class MainFragment extends BrowseSupportFragment {
         
         String authx = FnAuthUtils.generateAuthX(path, "GET", params);
         
-        api.getPhotosByTimeRange(token, authx, startTime, endTime, limit, offset, mode)
-            .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
+        enqueue(api.getPhotosByTimeRange(token, authx, startTime, endTime, limit, offset, mode), new Callback<FnHttpApi.GalleryListResponse>() {
                 @Override
                 public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
                                        Response<FnHttpApi.GalleryListResponse> response) {
@@ -612,9 +722,9 @@ public class MainFragment extends BrowseSupportFragment {
                             List<String> thumbUrls = new ArrayList<>();
                             for (FnHttpApi.GalleryPhoto photo : result.data.list) {
                                 if (photo.additional != null && photo.additional.thumbnail != null) {
-                                    String thumbUrl = photo.additional.thumbnail.mUrl;
+                                    String thumbUrl = photo.additional.thumbnail.sUrl;
                                     if (thumbUrl == null) {
-                                        thumbUrl = photo.additional.thumbnail.sUrl;
+                                        thumbUrl = photo.additional.thumbnail.mUrl;
                                     }
                                     if (thumbUrl != null) {
                                         if (!thumbUrl.startsWith("http") && baseUrl != null) {
@@ -650,26 +760,36 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void loadVisiblePersonPreviews(int centerIndex) {
-        if (personDateItems.isEmpty() || personTimelineItemsList.isEmpty()) return;
-
+        if (previewScreen != 2 || isPhotoListView || personDateItems.isEmpty() || personTimelineItemsList.isEmpty()) return;
+        personLastVisibleIdx = centerIndex;
         int start = Math.max(0, centerIndex - VISIBLE_RANGE_BUFFER);
         int end = Math.min(personDateItems.size(), centerIndex + VISIBLE_RANGE_BUFFER + 1);
-
-        for (int i = start; i < end; i++) {
-            if (!personLoadedIdx.contains(i)) {
-                personLoadedIdx.add(i);
-                final MediaItem mediaItem = personDateItems.get(i);
-                final FnHttpApi.PersonTimelineItem personItem = personTimelineItemsList.get(i);
-
-                if (personItem.itemCount > 0) {
-                    if (mediaItem.getPreviewThumbUrls() != null && !mediaItem.getPreviewThumbUrls().isEmpty()) {
-                        notifyItemChanged(mediaItem);
-                    } else {
-                        loadPersonDatePreviewThumbnails(mediaItem, personItem, () -> {
-                            notifyItemChanged(mediaItem);
-                        });
-                    }
+        for (int distance = 0; distance <= VISIBLE_RANGE_BUFFER; distance++) {
+            for (int side = 0; side < (distance == 0 ? 1 : 2); side++) {
+                final int index = centerIndex + (side == 0 ? distance : -distance);
+                if (index < start || index >= end || personLoadedIdx.contains(index)
+                        || pendingPersonPreviewIndexes.contains(index)) continue;
+                Long retryAfter = personPreviewRetryAfter.get(index);
+                if (retryAfter != null && retryAfter > android.os.SystemClock.uptimeMillis()) continue;
+                final MediaItem item = personDateItems.get(index);
+                if (item.getPreviewThumbUrls() != null) {
+                    personLoadedIdx.add(index);
+                    continue;
                 }
+                if (previewRequests >= MAX_PREVIEW_REQUESTS) return;
+                pendingPersonPreviewIndexes.add(index);
+                previewRequests++;
+                loadPersonDatePreviewThumbnails(item, personTimelineItemsList.get(index), () -> {
+                    previewRequests--;
+                    pendingPersonPreviewIndexes.remove(index);
+                    if (item.getPreviewThumbUrls() != null) {
+                        personLoadedIdx.add(index);
+                        notifyItemChanged(item);
+                    } else {
+                        personPreviewRetryAfter.put(index, android.os.SystemClock.uptimeMillis() + 3000);
+                    }
+                    loadVisiblePersonPreviews(personLastVisibleIdx);
+                });
             }
         }
     }
@@ -699,8 +819,7 @@ public class MainFragment extends BrowseSupportFragment {
         String path = "/p/api/v1/ai-person/photoLibrary/list";
         String authx = FnAuthUtils.generateAuthX(path, "GET", params);
 
-        api.getPersonPhotos(token, authx, currentPersonId, startTime, endTime, limit, 0, currentPersonId, startTime, endTime)
-            .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
+        enqueue(api.getPersonPhotos(token, authx, currentPersonId, startTime, endTime, limit, 0, currentPersonId, startTime, endTime), new Callback<FnHttpApi.GalleryListResponse>() {
                 @Override
                 public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
                                        Response<FnHttpApi.GalleryListResponse> response) {
@@ -710,9 +829,9 @@ public class MainFragment extends BrowseSupportFragment {
                             List<String> thumbUrls = new ArrayList<>();
                             for (FnHttpApi.GalleryPhoto photo : result.data.list) {
                                 if (photo.additional != null && photo.additional.thumbnail != null) {
-                                    String thumbUrl = photo.additional.thumbnail.mUrl;
+                                    String thumbUrl = photo.additional.thumbnail.sUrl;
                                     if (thumbUrl == null) {
-                                        thumbUrl = photo.additional.thumbnail.sUrl;
+                                        thumbUrl = photo.additional.thumbnail.mUrl;
                                     }
                                     if (thumbUrl != null) {
                                         if (!thumbUrl.startsWith("http") && baseUrl != null) {
@@ -736,106 +855,11 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     public void loadPhotosByDate(String dateStr, int itemCount) {
-        // 保存时间线的滚动位置
+        if (api == null || token == null || token.isEmpty()) return;
         saveTimelinePosition();
-        
-        if (api == null || token == null || token.isEmpty()) {
-            Log.e(TAG, "API未初始化");
-            return;
-        }
-
-        showLoadingOverlay("正在加载照片...");
-        Log.d(TAG, "Loading photos for date: " + dateStr);
-
-        String dateTime = dateStr.replace("-", ":");
-        String startTime = dateTime + " 00:00:00";
-        String endTime = dateTime + " 23:59:59";
-        int limit = itemCount;
-        int offset = 0;
-        String mode = "index";
-
-        StringBuilder paramsBuilder = new StringBuilder();
-        paramsBuilder.append("end_time=").append(endTime);
-        paramsBuilder.append("&limit=").append(limit);
-        paramsBuilder.append("&mode=").append(mode);
-        paramsBuilder.append("&offset=").append(offset);
-        paramsBuilder.append("&start_time=").append(startTime);
-        
-        String params = paramsBuilder.toString();
-        String path = "/p/api/v1/gallery/getList";
-        
-        Log.d(TAG, "Path: " + path);
-        Log.d(TAG, "Params: " + params);
-
-        String authx = FnAuthUtils.generateAuthX(path, "GET", params);
-
-        api.getPhotosByTimeRange(token, authx, startTime, endTime, limit, offset, mode)
-            .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
-                @Override
-                public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
-                                       Response<FnHttpApi.GalleryListResponse> response) {
-                    hideLoadingOverlay();
-                    if (response.isSuccessful() && response.body() != null) {
-                        FnHttpApi.GalleryListResponse result = response.body();
-                        if (result.code == 0 && result.data != null && result.data.list != null) {
-                            displayPhotosByDate(dateStr, result.data.list);
-                        }
-                    }
-                }
-
-                @Override
-                public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
-                    Log.e(TAG, "加载照片列表失败", t);
-                    hideLoadingOverlay();
-                }
-            });
-    }
-
-    private void displayPhotosByDate(String dateStr, List<FnHttpApi.GalleryPhoto> photos) {
-        isPhotoListView = true;
-        mRowsAdapter.clear();
-
-        HeaderItem header = new HeaderItem(dateStr + " (" + photos.size() + "张)");
-        ArrayObjectAdapter listRowAdapter = new ArrayObjectAdapter(mCardPresenter);
-
-        currentMediaList = new ArrayList<>();
-
-        for (FnHttpApi.GalleryPhoto photo : photos) {
-            String thumbUrl = null;
-            String originalUrl = null;
-
-            if (photo.additional != null && photo.additional.thumbnail != null) {
-                FnHttpApi.GalleryThumbnail thumbnail = photo.additional.thumbnail;
-                
-                thumbUrl = thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : (thumbnail.sUrl != null ? baseUrl + thumbnail.sUrl : null);
-                
-                originalUrl = thumbnail.originalUrl != null ? baseUrl + thumbnail.originalUrl : (thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : null);
-            }
-
-            MediaItem item = new MediaItem(
-                String.valueOf(photo.id),
-                photo.fileName,
-                photo.category,
-                thumbUrl,
-                originalUrl
-            );
-            currentMediaList.add(item);
-            listRowAdapter.add(item);
-        }
-
-        mRowsAdapter.add(new ListRow(header, listRowAdapter));
-        
-        // 恢复照片列表的位置
-        if (savedPhotoListPosition >= 0) {
-            lazyLoadHandler.postDelayed(() -> {
-                try {
-                    setSelectedPosition(savedPhotoListPosition);
-                    Log.d(TAG, "Restored photo list position: " + savedPhotoListPosition);
-                } catch (Exception e) {
-                    Log.e(TAG, "Error restoring photo list position", e);
-                }
-            }, 300);
-        }
+        beginScreen();
+        photoDate = dateStr;
+        startPhotoPaging("date", dateStr);
     }
 
     public void loadFavorites() {
@@ -844,11 +868,12 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载收藏...");
         String params = "is_collect=1";
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/timeline", "GET", params);
 
-        api.getTimeline(token, authx, 1).enqueue(new Callback<FnHttpApi.TimelineResponse>() {
+        enqueue(api.getTimeline(token, authx, 1), new Callback<FnHttpApi.TimelineResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.TimelineResponse> call,
                                    Response<FnHttpApi.TimelineResponse> response) {
@@ -878,10 +903,11 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载最近照片...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/explore/recent_timeline", "GET", null);
 
-        api.getRecentTimeline(token, authx).enqueue(new Callback<FnHttpApi.TimelineResponse>() {
+        enqueue(api.getRecentTimeline(token, authx), new Callback<FnHttpApi.TimelineResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.TimelineResponse> call,
                                    Response<FnHttpApi.TimelineResponse> response) {
@@ -911,11 +937,12 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载地点...");
         String params = "offset=0&limit=-1";
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/explore/geos", "GET", params);
 
-        api.getGeos(token, authx, 0, -1).enqueue(new Callback<FnHttpApi.GeoListResponse>() {
+        enqueue(api.getGeos(token, authx, 0, -1), new Callback<FnHttpApi.GeoListResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.GeoListResponse> call,
                                    Response<FnHttpApi.GeoListResponse> response) {
@@ -974,40 +1001,6 @@ public class MainFragment extends BrowseSupportFragment {
         }
     }
 
-    private void displayPhotoList(String title, List<FnHttpApi.GalleryPhoto> photos) {
-        isPhotoListView = true;
-        timelineItems = null;
-        mRowsAdapter.clear();
-
-        HeaderItem header = new HeaderItem(title + " (" + photos.size() + ")");
-        ArrayObjectAdapter listRowAdapter = new ArrayObjectAdapter(mCardPresenter);
-
-        currentMediaList = new ArrayList<>();
-
-        for (FnHttpApi.GalleryPhoto photo : photos) {
-            String thumbUrl = null;
-            String originalUrl = null;
-
-                if (photo.additional != null && photo.additional.thumbnail != null) {
-                FnHttpApi.GalleryThumbnail thumbnail = photo.additional.thumbnail;
-                thumbUrl = thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : (thumbnail.sUrl != null ? baseUrl + thumbnail.sUrl : null);
-                originalUrl = thumbnail.originalUrl != null ? baseUrl + thumbnail.originalUrl : (thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : null);
-            }
-
-            MediaItem item = new MediaItem(
-                String.valueOf(photo.id),
-                photo.fileName,
-                photo.category,
-                thumbUrl,
-                originalUrl
-            );
-            currentMediaList.add(item);
-            listRowAdapter.add(item);
-        }
-
-        mRowsAdapter.add(new ListRow(header, listRowAdapter));
-    }
-
     private void showEmptyState(String message) {
         isPhotoListView = true;
         timelineItems = null;
@@ -1022,91 +1015,137 @@ public class MainFragment extends BrowseSupportFragment {
     private List<FnHttpApi.GeoItem> savedPlacesList;
     private List<FnHttpApi.PersonItem> savedPersonList;
 
-    private void loadAlbumPhotosPage(final String albumName, final int albumId,
-                                     final int offset, final List<FnHttpApi.GalleryPhoto> allPhotos) {
-        String params = "album_id=" + albumId + "&sort_by=date_time&sort_direction=desc&offset=" + offset + "&limit=35";
-        String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/photos", "GET", params);
+    public void loadPhotosByAlbum(String albumId, String albumName) {
+        if (api == null || token == null || token.isEmpty()) return;
+        final int id;
+        try { id = Integer.parseInt(albumId); } catch (NumberFormatException error) { return; }
+        Integer selection = albumPositions.get(albumId);
+        savedAlbumSelection = selection == null ? -1 : selection;
+        beginScreen();
+        timelineItems = null;
+        photoAlbumId = id;
+        startPhotoPaging("album", "相册: " + albumName);
+    }
 
-        api.getAlbumPhotos(token, authx, albumId, "date_time", "desc", offset, 35)
-            .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
-            @Override
-            public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
-                                   Response<FnHttpApi.GalleryListResponse> response) {
-                if (response.isSuccessful() && response.body() != null) {
-                    FnHttpApi.GalleryListResponse result = response.body();
-                    if (result.code == 0 && result.data != null && result.data.list != null) {
-                        allPhotos.addAll(result.data.list);
-                        if (result.data.list.size() >= 35) {
-                            loadAlbumPhotosPage(albumName, albumId, offset + 35, allPhotos);
-                            return;
-                        }
-                    }
-                }
-                displayAlbumPhotos(albumName, allPhotos);
+    private void startPhotoPaging(String mode, String title) {
+        photoMode = mode;
+        pagedTitle = title;
+        photoPaging = new MainPagingState(PHOTO_PAGE_SIZE);
+        currentMediaList = new ArrayList<>();
+        photoPositions.clear();
+        isPhotoListView = true;
+        mRowsAdapter.clear();
+        loadPhotoPage();
+    }
+
+    private void loadPhotoPage() {
+        if (photoPaging == null) return;
+        final int offset = photoPaging.begin();
+        if (offset < 0) return;
+        updatePageFooter(photoPaging, currentMediaList.size());
+        Call<FnHttpApi.GalleryListResponse> request;
+        if ("album".equals(photoMode)) {
+            String params = "album_id=" + photoAlbumId + "&sort_by=date_time&sort_direction=desc&offset="
+                    + offset + "&limit=" + PHOTO_PAGE_SIZE;
+            String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/photos", "GET", params);
+            request = api.getAlbumPhotos(token, authx, photoAlbumId, "date_time", "desc", offset, PHOTO_PAGE_SIZE);
+        } else {
+            String dateTime = photoDate.replace("-", ":");
+            String start = dateTime + " 00:00:00";
+            String end = dateTime + " 23:59:59";
+            if ("person".equals(photoMode)) {
+                String params = "album_id=" + photoPersonId + "&endTime=" + end + "&end_time=" + end
+                        + "&limit=" + PHOTO_PAGE_SIZE + "&offset=" + offset + "&personId=" + photoPersonId
+                        + "&startTime=" + start + "&start_time=" + start;
+                String authx = FnAuthUtils.generateAuthX("/p/api/v1/ai-person/photoLibrary/list", "GET", params);
+                request = api.getPersonPhotos(token, authx, photoPersonId, start, end, PHOTO_PAGE_SIZE,
+                        offset, photoPersonId, start, end);
+            } else {
+                String params = "end_time=" + end + "&limit=" + PHOTO_PAGE_SIZE + "&mode=index&offset="
+                        + offset + "&start_time=" + start;
+                String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/getList", "GET", params);
+                request = api.getPhotosByTimeRange(token, authx, start, end, PHOTO_PAGE_SIZE, offset, "index");
             }
-
-            @Override
-            public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
-                if (!allPhotos.isEmpty()) {
-                    displayAlbumPhotos(albumName, allPhotos);
-                } else {
-                    Log.e(TAG, "加载相册照片失败", t);
+        }
+        enqueue(request, new Callback<FnHttpApi.GalleryListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
+                    Response<FnHttpApi.GalleryListResponse> response) {
+                FnHttpApi.GalleryListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    photoPaging.fail();
+                    finishPhotoPage(false);
+                    return;
                 }
+                List<String> ids = new ArrayList<>();
+                for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
+                for (int index : photoPaging.accept(ids, result.data.hasNext)) {
+                    FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
+                    FnHttpApi.GalleryThumbnail thumb = photo.additional != null ? photo.additional.thumbnail : null;
+                    String thumbUrl = thumb == null ? null : absoluteUrl(thumb.mUrl != null ? thumb.mUrl : thumb.sUrl);
+                    String mediaUrl = thumb == null ? null : absoluteUrl(thumb.originalUrl);
+                    if ("video".equals(photo.category)) {
+                        mediaUrl = thumb != null && thumb.videoUrl != null ? absoluteUrl(thumb.videoUrl)
+                                : baseUrl + "/p/api/v1/stream/v/" + photo.id;
+                    } else if (mediaUrl == null) {
+                        mediaUrl = thumbUrl;
+                    }
+                    MediaItem item = new MediaItem(String.valueOf(photo.id), photo.fileName,
+                            photo.category, thumbUrl, mediaUrl);
+                    int position = currentMediaList.size();
+                    currentMediaList.add(item);
+                    photoPositions.put(item.getId(), position);
+                    appendPagedCard(item, position);
+                }
+                finishPhotoPage(true);
+                if (offset == 0 && !currentMediaList.isEmpty()) {
+                    positionHandler.post(() -> setSelectedPosition(0));
+                }
+            }
+            @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable error) {
+                photoPaging.fail();
+                finishPhotoPage(false);
             }
         });
     }
 
-    public void loadPhotosByAlbum(String albumId, String albumName) {
-        if (api == null || token == null || token.isEmpty()) {
-            Log.e(TAG, "API未初始化");
-            return;
+    private void finishPhotoPage(boolean success) {
+        updatePageFooter(photoPaging, currentMediaList.size());
+        if (detailPageCallback != null) {
+            MediaListHolder.PageCallback callback = detailPageCallback;
+            detailPageCallback = null;
+            if (success) callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore());
+            else callback.onFailure();
         }
-
-        saveTimelinePosition();
-        loadAlbumPhotosPage(albumName, Integer.parseInt(albumId), 0, new ArrayList<FnHttpApi.GalleryPhoto>());
     }
 
-    private void displayAlbumPhotos(String albumName, List<FnHttpApi.GalleryPhoto> photos) {
-        isPhotoListView = true;
-        timelineItems = null;
-        mRowsAdapter.clear();
+    private void appendPagedCard(MediaItem item, int position) {
+        if (position % 6 == 0) {
+            pagedLastRow = new ArrayObjectAdapter(mCardPresenter);
+            ListRow row = new ListRow(position == 0 ? new HeaderItem(pagedTitle) : null, pagedLastRow);
+            int footerIndex = pageFooter == null ? -1 : mRowsAdapter.indexOf(pageFooter);
+            if (footerIndex >= 0) mRowsAdapter.add(footerIndex, row);
+            else mRowsAdapter.add(row);
+        }
+        pagedLastRow.add(item);
+    }
 
-        currentMediaList = new ArrayList<>();
-
-        int itemsPerRow = 6;
-        int totalRows = (int) Math.ceil((double) photos.size() / itemsPerRow);
-
-        for (int row = 0; row < totalRows; row++) {
-            int start = row * itemsPerRow;
-            int end = Math.min(start + itemsPerRow, photos.size());
-
-            HeaderItem header = row == 0 ? new HeaderItem("相册: " + albumName + " (" + photos.size() + "张)") : null;
-            ArrayObjectAdapter rowAdapter = new ArrayObjectAdapter(mCardPresenter);
-
-            for (int i = start; i < end; i++) {
-                FnHttpApi.GalleryPhoto photo = photos.get(i);
-
-                String thumbUrl = null;
-                String mediaUrl = null;
-
-                if (photo.additional != null && photo.additional.thumbnail != null) {
-                    FnHttpApi.GalleryThumbnail thumbnail = photo.additional.thumbnail;
-                    thumbUrl = thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : (thumbnail.sUrl != null ? baseUrl + thumbnail.sUrl : null);
-                    mediaUrl = thumbnail.originalUrl != null ? baseUrl + thumbnail.originalUrl : null;
-                }
-
-                MediaItem item = new MediaItem(
-                    String.valueOf(photo.id),
-                    photo.fileName,
-                    photo.category,
-                    thumbUrl,
-                    mediaUrl
-                );
-                currentMediaList.add(item);
-                rowAdapter.add(item);
-            }
-
-            mRowsAdapter.add(new ListRow(header, rowAdapter));
+    private void updatePageFooter(MainPagingState state, int count) {
+        if (state == null) return;
+        String status;
+        if (state.isLoading()) status = "正在加载…（已加载 " + count + "）";
+        else if (state.hasFailed()) status = "加载失败，按确定重试（已加载 " + count + "）";
+        else if (state.isStalled()) status = "服务器返回重复页，已停止加载（" + count + "）";
+        else if (state.hasMore()) status = "按确定加载更多（已加载 " + count + "）";
+        else status = count == 0 ? "暂无内容" : "已全部加载（" + count + "）";
+        MediaItem action = new MediaItem("__page_action", status, "page_action", null, null);
+        if (pageFooter == null) {
+            pageFooterAdapter = new ArrayObjectAdapter(mCardPresenter);
+            pageFooterAdapter.add(action);
+            pageFooter = new ListRow(new HeaderItem("加载状态"), pageFooterAdapter);
+            mRowsAdapter.add(pageFooter);
+        } else {
+            pageFooterAdapter.replace(0, action);
         }
     }
 
@@ -1116,6 +1155,8 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginScreen();
+        isPhotoListView = true;
         showLoadingOverlay("正在加载地点照片...");
 
         String[] parts = placeItem.getId().split("/", 2);
@@ -1131,7 +1172,7 @@ public class MainFragment extends BrowseSupportFragment {
         Log.d(TAG, "URL: " + url);
         Log.d(TAG, "Method: POST");
         Log.d(TAG, "Body: " + requestBody);
-        Log.d(TAG, "authx: " + authx);
+
 
         MediaType JSON = MediaType.parse("application/json; charset=UTF-8");
         RequestBody body = RequestBody.create(JSON, requestBody);
@@ -1144,11 +1185,15 @@ public class MainFragment extends BrowseSupportFragment {
             .build();
 
         OkHttpClient client = HttpClientProvider.getClient(getActivity());
-        client.newCall(request).enqueue(new okhttp3.Callback() {
+        final long generation = requests.generation();
+        okhttp3.Call geoCall = client.newCall(request);
+        requests.track(geoCall, geoCall::cancel);
+        geoCall.enqueue(new okhttp3.Callback() {
             @Override
             public void onFailure(okhttp3.Call call, IOException e) {
                 Log.e(TAG, "地点照片请求网络异常", e);
-                getActivity().runOnUiThread(() -> {
+                positionHandler.post(() -> {
+                    if (!requests.complete(call, generation)) return;
                     hideLoadingOverlay();
                     showEmptyState("网络异常: " + e.getMessage());
                 });
@@ -1159,34 +1204,38 @@ public class MainFragment extends BrowseSupportFragment {
                 try {
                     String responseBody = response.body() != null ? response.body().string() : null;
                     Log.d(TAG, "Response code: " + response.code());
-                    Log.d(TAG, "Response body: " + responseBody);
+
 
                     if (response.isSuccessful() && responseBody != null) {
                         Gson gson = new Gson();
                         FnHttpApi.SearchResultsResponse result = gson.fromJson(responseBody, FnHttpApi.SearchResultsResponse.class);
                         if (result.code == 0 && result.data != null && result.data.list != null) {
                             final List<FnHttpApi.GalleryPhoto> photos = result.data.list;
-                            getActivity().runOnUiThread(() -> {
+                            positionHandler.post(() -> {
+                                if (!requests.complete(call, generation)) return;
                                 hideLoadingOverlay();
                                 displayGeoPhotos(placeName, photos);
                             });
                         } else {
                             Log.e(TAG, "地点照片返回异常: code=" + result.code);
-                            getActivity().runOnUiThread(() -> {
+                            positionHandler.post(() -> {
+                                if (!requests.complete(call, generation)) return;
                                 hideLoadingOverlay();
                                 showEmptyState("暂无照片");
                             });
                         }
                     } else {
                         Log.e(TAG, "地点照片请求失败: code=" + response.code() + " body=" + responseBody);
-                        getActivity().runOnUiThread(() -> {
+                        positionHandler.post(() -> {
+                                if (!requests.complete(call, generation)) return;
                             hideLoadingOverlay();
                             showEmptyState("请求失败(" + response.code() + ")");
                         });
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "解析响应异常", e);
-                    getActivity().runOnUiThread(() -> {
+                    positionHandler.post(() -> {
+                                if (!requests.complete(call, generation)) return;
                         hideLoadingOverlay();
                         showEmptyState("解析失败");
                     });
@@ -1267,10 +1316,11 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        beginRootScreen();
         showLoadingOverlay("正在加载人物...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/ai-person/list", "GET", "getAll=true&limit=-1&orderBy=0");
 
-        api.getPersonList(token, authx, true, -1, 0).enqueue(new Callback<FnHttpApi.PersonListResponse>() {
+        enqueue(api.getPersonList(token, authx, true, -1, 0), new Callback<FnHttpApi.PersonListResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.PersonListResponse> call,
                                    Response<FnHttpApi.PersonListResponse> response) {
@@ -1336,14 +1386,16 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
 
+        personLastVisibleIdx = -1;
         currentPersonId = personId;
         currentPersonName = personName;
         savedPersonTimelineItems = null;
 
+        beginScreen();
         showLoadingOverlay("正在加载 " + personName + " 的时间线...");
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/ai-person/photoLibrary/timeLine", "GET", "id=" + personId);
 
-        api.getPersonTimeline(token, authx, personId).enqueue(new Callback<FnHttpApi.PersonTimelineResponse>() {
+        enqueue(api.getPersonTimeline(token, authx, personId), new Callback<FnHttpApi.PersonTimelineResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.PersonTimelineResponse> call,
                                    Response<FnHttpApi.PersonTimelineResponse> response) {
@@ -1368,6 +1420,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void displayPersonTimeline(List<FnHttpApi.PersonTimelineItem> items) {
+        previewScreen = 2;
         isPhotoListView = false;
         mRowsAdapter.clear();
         savedPersonTimelineItems = new ArrayList<>(items);
@@ -1395,6 +1448,7 @@ public class MainFragment extends BrowseSupportFragment {
             MediaItem mediaItem = new MediaItem(dateStr, title + suffix, item.itemCount);
             mediaItem.setType("person_date");
             currentRowAdapter.add(mediaItem);
+            previewRows.put(mediaItem, currentRowAdapter);
             personDateItems.add(mediaItem);
             personTimelineItemsList.add(item);
         }
@@ -1403,87 +1457,15 @@ public class MainFragment extends BrowseSupportFragment {
         lazyLoadHandler.postDelayed(() -> {
             loadVisiblePersonPreviews(0);
         }, 300);
+        restorePreviewPosition(personDateItems, personLastVisibleIdx);
     }
 
     public void loadPersonPhotosByDate(String dateStr, int itemCount) {
-        if (api == null || token == null || token.isEmpty() || currentPersonId < 0) {
-            Log.e(TAG, "API未初始化或未选择人物");
-            return;
-        }
-
-        showLoadingOverlay("正在加载照片...");
-
-        String dateTime = dateStr.replace("-", ":");
-        String startTime = dateTime + " 00:00:00";
-        String endTime = dateTime + " 23:59:59";
-        int limit = itemCount;
-        int offset = 0;
-
-        String params = "album_id=" + currentPersonId
-            + "&endTime=" + endTime
-            + "&end_time=" + endTime
-            + "&limit=" + limit
-            + "&offset=" + offset
-            + "&personId=" + currentPersonId
-            + "&startTime=" + startTime
-            + "&start_time=" + startTime;
-        String path = "/p/api/v1/ai-person/photoLibrary/list";
-        String authx = FnAuthUtils.generateAuthX(path, "GET", params);
-
-        api.getPersonPhotos(token, authx, currentPersonId, startTime, endTime, limit, offset, currentPersonId, startTime, endTime)
-            .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
-                @Override
-                public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
-                                       Response<FnHttpApi.GalleryListResponse> response) {
-                    hideLoadingOverlay();
-                    if (response.isSuccessful() && response.body() != null) {
-                        FnHttpApi.GalleryListResponse result = response.body();
-                        if (result.code == 0 && result.data != null && result.data.list != null) {
-                            displayPersonPhotos(dateStr, result.data.list);
-                        }
-                    }
-                }
-
-                @Override
-                public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
-                    Log.e(TAG, "加载人物照片失败", t);
-                    hideLoadingOverlay();
-                }
-            });
-    }
-
-    private void displayPersonPhotos(String dateStr, List<FnHttpApi.GalleryPhoto> photos) {
-        isPhotoListView = true;
-        mRowsAdapter.clear();
-
-        String title = (currentPersonName != null ? currentPersonName : "") + " - " + dateStr + " (" + photos.size() + "张)";
-        HeaderItem header = new HeaderItem(title);
-        ArrayObjectAdapter rowAdapter = new ArrayObjectAdapter(mCardPresenter);
-
-        currentMediaList = new ArrayList<>();
-
-        for (FnHttpApi.GalleryPhoto photo : photos) {
-            String thumbUrl = null;
-            String mediaUrl = null;
-
-            if (photo.additional != null && photo.additional.thumbnail != null) {
-                FnHttpApi.GalleryThumbnail thumbnail = photo.additional.thumbnail;
-                thumbUrl = thumbnail.mUrl != null ? baseUrl + thumbnail.mUrl : (thumbnail.sUrl != null ? baseUrl + thumbnail.sUrl : null);
-                mediaUrl = thumbnail.originalUrl != null ? baseUrl + thumbnail.originalUrl : null;
-            }
-
-            MediaItem item = new MediaItem(
-                String.valueOf(photo.id),
-                photo.fileName,
-                photo.category,
-                thumbUrl,
-                mediaUrl
-            );
-            currentMediaList.add(item);
-            rowAdapter.add(item);
-        }
-
-        mRowsAdapter.add(new ListRow(header, rowAdapter));
+        if (api == null || token == null || token.isEmpty() || currentPersonId < 0) return;
+        beginScreen();
+        photoDate = dateStr;
+        photoPersonId = currentPersonId;
+        startPhotoPaging("person", currentPersonName + " - " + dateStr);
     }
 
     private void openMediaDetail(MediaItem mediaItem) {
@@ -1500,7 +1482,41 @@ public class MainFragment extends BrowseSupportFragment {
             }
         }
 
-        MediaListHolder.set(currentMediaList);
+        if (photoPaging == null) {
+            MediaListHolder.set(currentMediaList);
+        } else {
+            final long generation = requests.generation();
+            MediaListHolder.set(currentMediaList, new MediaListHolder.PageSource() {
+                private final MainPagingState.DeliveryCursor delivery =
+                        new MainPagingState.DeliveryCursor(currentMediaList.size());
+                @Override public boolean hasMore() {
+                    return requests.isCurrent(generation) && photoPaging != null
+                            && (delivery.hasPending(currentMediaList.size()) || photoPaging.hasMore());
+                }
+                @Override public void loadMore(MediaListHolder.PageCallback callback) {
+                    if (!hasMore() || detailPageCallback != null) {
+                        callback.onFailure();
+                        return;
+                    }
+                    // A prefetch can finish (including its terminal page) after detail copied its list.
+                    // Deliver that buffered tail before consulting/fetching the next network page.
+                    if (delivery.hasPending(currentMediaList.size())) {
+                        delivery.delivered(currentMediaList.size());
+                        callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore());
+                        return;
+                    }
+                    detailPageCallback = new MediaListHolder.PageCallback() {
+                        @Override public void onLoaded(List<MediaItem> items, boolean hasMore) {
+                            delivery.delivered(items.size());
+                            callback.onLoaded(items, hasMore);
+                        }
+                        @Override public void onFailure() { callback.onFailure(); }
+                    };
+                    // A list prefetch may already be in flight; its completion also serves this callback.
+                    if (!photoPaging.isLoading()) loadPhotoPage();
+                }
+            });
+        }
         Intent intent = new Intent(getActivity(), MediaDetailActivity.class);
         intent.putExtra("CURRENT_INDEX", index);
         startActivity(intent);
@@ -1522,6 +1538,8 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override
     public void onDestroy() {
+        beginScreen();
+        requests.close();
         super.onDestroy();
         lazyLoadHandler.removeCallbacksAndMessages(null);
         positionHandler.removeCallbacksAndMessages(null);

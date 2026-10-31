@@ -2,6 +2,8 @@
 """
 fnOS comprehensive mock server for testing the TV app.
 Simulates all REST APIs, WebSocket login, and media streaming on a single port.
+Offline paging contract checks: python -m unittest discover -s test -p test_mock_contract.py
+The folder fixture exposes the same synthetic collection under each requested path.
 """
 
 import asyncio
@@ -19,9 +21,6 @@ import hashlib
 import uuid as uuid_mod
 import ipaddress
 from datetime import datetime, timedelta, timezone
-
-import imageio
-import numpy as np
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -161,7 +160,7 @@ def build_fake_data():
             "ownerId": 1,
             "dateTime": dt.strftime("%Y-%m-%d %H:%M:%S"),
             "photoDateTime": dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "fileType": "jpg" if typ == "image" else "mp4",
+            "fileType": "jpg" if typ == "photo" else "mp4",
             "category": typ,
             "fileName": PHOTO_NAMES[i % len(PHOTO_NAMES)],
             "fileSize": RNG.randint(500_000, 8_000_000),
@@ -204,8 +203,7 @@ def build_fake_data():
     # ── Timeline ──
     date_groups = {}
     for p in PHOTOS:
-        day_offset = (p["id"] * 3) % 90
-        d2 = NOW - timedelta(days=day_offset)
+        d2 = datetime.strptime(p["photoDateTime"], "%Y-%m-%d %H:%M:%S")
         key = (d2.year, d2.month, d2.day)
         date_groups.setdefault(key, []).append(p)
 
@@ -364,19 +362,66 @@ def ok_v2(data=None):
 
 
 def make_list(data_list, total=None, has_next=False):
-    return {"list": data_list, "total": total or len(data_list), "hasNext": has_next}
+    return {"list": data_list, "count": len(data_list),
+            "total": len(data_list) if total is None else total, "hasNext": has_next}
 
 
 def extract_paging(request):
-    page = int(request.query.get("page", 1))
-    page_size = int(request.query.get("pageSize", 50))
-    return page, page_size
+    """Return offset/limit; accept old page/pageSize only as fallback aliases."""
+    try:
+        query = request.query
+        limit = int(query.get("limit", query.get("pageSize", 50)))
+        if "offset" in query:
+            offset = int(query["offset"])
+        else:
+            page = int(query.get("page", 1))
+            if page < 1:
+                raise ValueError("page must be positive")
+            offset = (page - 1) * max(limit, 0)
+        if offset < 0 or limit < -1 or limit == 0:
+            raise ValueError("invalid offset/limit")
+        return offset, limit
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="Invalid pagination: " + str(exc))
 
 
-def paginate(items, page, page_size):
-    start = (page - 1) * page_size
-    end = start + page_size
-    return items[start:end], len(items)
+def paginate(items, offset, limit):
+    return items[offset:] if limit == -1 else items[offset:offset + limit], len(items)
+
+
+def paged_response(request, items):
+    offset, limit = extract_paging(request)
+    page, total = paginate(items, offset, limit)
+    return ok_v2(make_list(page, total, offset + len(page) < total))
+
+
+def parse_photo_time(value):
+    """NAS date strings (including yyyy:MM:dd) or legacy epoch milliseconds."""
+    if str(value).isdigit():
+        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+    value = str(value)
+    if len(value) >= 10 and value[4] == ":" and value[7] == ":":
+        value = value[:10].replace(":", "-") + value[10:]
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def filter_dates(request, photos):
+    try:
+        start = request.query.get("start_time", request.query.get("startTime", ""))
+        end = request.query.get("end_time", request.query.get("endTime", ""))
+        start = parse_photo_time(start) if start else None
+        end = parse_photo_time(end) if end else None
+        return [p for p in photos
+                if (start is None or parse_photo_time(p["photoDateTime"]) >= start)
+                and (end is None or parse_photo_time(p["photoDateTime"]) <= end)]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise web.HTTPBadRequest(text="Invalid date range: " + str(exc))
+
+
+def ordered_photos(request, photos):
+    reverse = request.query.get("sort_direction", "desc") == "desc"
+    return sorted(photos, key=lambda p: (p.get("photoDateTime", ""), p["id"]), reverse=reverse)
 
 
 def extract_auth_token(request):
@@ -389,17 +434,13 @@ def extract_auth_token(request):
 # ──────────────── HTTP REST Handlers ────────────────
 
 async def handle_album_list(request):
-    data = {"list": [a for a in ALBUMS]}
-    return ok_v2(data)
+    return paged_response(request, ALBUMS)
 
 
 async def handle_album_photos(request):
-    album_id = int(request.query.get("albumId", 0))
-    page, page_size = extract_paging(request)
-    adata = ALBUM_MAP.get(album_id, {})
-    photos = adata.get("photos", [])
-    paged, total = paginate(photos, page, page_size)
-    return ok_v2(make_list(paged, total))
+    album_id = int(request.query.get("album_id", request.query.get("albumId", 0)))
+    photos = ALBUM_MAP.get(album_id, {}).get("photos", [])
+    return paged_response(request, ordered_photos(request, photos))
 
 
 async def handle_folder_list(request):
@@ -418,7 +459,7 @@ async def handle_folder_list(request):
 
 
 async def handle_sub_folder_list(request):
-    path = request.query.get("path", "/")
+    path = request.query.get("folderPath", request.query.get("path", "/"))
     items = []
     for i in range(5):
         items.append({"name": f"Subfolder{i+1}", "path": f"{path}/Subfolder{i+1}"})
@@ -426,23 +467,21 @@ async def handle_sub_folder_list(request):
 
 
 async def handle_folder_file_list(request):
-    path = request.query.get("path", "/")
-    page, page_size = extract_paging(request)
+    path = request.query.get("folderPath", request.query.get("path", "/"))
     items = []
-    for i, ph in enumerate(PHOTOS[:20]):
+    for ph in PHOTOS:
         items.append({
             "id": ph["id"], "ownerId": 1,
             "dateTime": ph["dateTime"], "photoDateTime": ph["photoDateTime"],
             "fileType": ph["fileType"], "category": ph["category"],
             "fileName": ph["fileName"], "fileSize": ph["fileSize"],
             "isCollect": ph["isCollect"], "mp": ph["mp"],
-            "filePath": ph["filePath"], "height": ph["height"], "width": ph["width"],
+            "filePath": path.rstrip("/") + "/" + ph["fileName"], "height": ph["height"], "width": ph["width"],
             "flash": 0, "geo": ph["geo"], "isLive": 0, "mediaDuration": 0,
             "rotation": ph["rotation"], "isCanPreview": 1,
             "photoUUID": ph["photoUUID"], "fileHash": hashlib.md5(ph["fileName"].encode()).hexdigest(),
         })
-    paged, total = paginate(items, page, page_size)
-    return ok_v2(make_list(paged, len(items)))
+    return paged_response(request, items)
 
 
 async def handle_timeline(request):
@@ -450,19 +489,8 @@ async def handle_timeline(request):
 
 
 async def handle_gallery_list(request):
-    page, page_size = extract_paging(request)
-    start_time = request.query.get("startTime", "")
-    end_time = request.query.get("endTime", "")
-    photos = PHOTOS
-    if start_time:
-        st = int(start_time)
-        photos = [p for p in photos if p["id"] * 86400000 + 1700000000000 >= st]
-    if end_time:
-        et = int(end_time)
-        photos = [p for p in photos if p["id"] * 86400000 + 1700000000000 <= et]
-    paged, total = paginate(photos, page, page_size)
-    result = {"list": paged, "count": len(paged), "hasNext": (page * page_size) < total}
-    return ok_v2(result)
+    photos = filter_dates(request, PHOTOS)
+    return paged_response(request, ordered_photos(request, photos))
 
 
 async def handle_photo_detail(request):
@@ -484,11 +512,9 @@ async def handle_geo_list(request):
 
 
 async def handle_search(request):
-    keyword = request.query.get("keyword", "")
-    page, page_size = extract_paging(request)
-    matched = [p for p in PHOTOS if keyword.lower() in p["fileName"].lower()] if keyword else PHOTOS[:20]
-    paged, total = paginate(matched, page, page_size)
-    return ok_v2({"list": paged, "count": len(paged), "hasNext": (page * page_size) < total, "total": total})
+    keyword = request.query.get("keyword", "").casefold()
+    matched = [p for p in PHOTOS if keyword in p["fileName"].casefold()]
+    return paged_response(request, ordered_photos(request, matched))
 
 
 async def handle_search_results(request):
@@ -545,8 +571,7 @@ async def handle_app_version(request):
 
 
 async def handle_recent(request):
-    recent = sorted(PHOTOS, key=lambda p: p["dateTime"], reverse=True)[:20]
-    return ok_v2({"list": recent, "count": len(recent), "hasNext": False})
+    return paged_response(request, sorted(PHOTOS, key=lambda p: p["dateTime"], reverse=True))
 
 
 async def handle_explore_recent_timeline(request):
@@ -559,12 +584,11 @@ async def handle_person_list(request):
 
 
 async def handle_person_timeline(request):
-    person_id = int(request.query.get("personId", 0))
+    person_id = int(request.query.get("personId", request.query.get("id", request.query.get("album_id", 0))))
     photos = PERSON_PHOTOS.get(person_id, [])
     tl = {}
     for p in photos:
-        day_offset = (p["id"] * 3) % 90
-        dt = NOW - timedelta(days=day_offset)
+        dt = parse_photo_time(p["photoDateTime"])
         key = (dt.year, dt.month, dt.day)
         tl.setdefault(key, 0)
         tl[key] += 1
@@ -574,16 +598,14 @@ async def handle_person_timeline(request):
 
 
 async def handle_person_photos(request):
-    person_id = int(request.query.get("personId", 0))
-    page, page_size = extract_paging(request)
-    photos = PERSON_PHOTOS.get(person_id, [])
-    paged, total = paginate(photos, page, page_size)
-    return ok_v2(make_list(paged, total))
+    person_id = int(request.query.get("personId", request.query.get("id", request.query.get("album_id", 0))))
+    photos = filter_dates(request, PERSON_PHOTOS.get(person_id, []))
+    return paged_response(request, ordered_photos(request, photos))
 
 
 async def handle_collect_list(request):
     collected = [p for p in PHOTOS if p["isCollect"] == 1]
-    return ok_v2(make_list(collected, len(collected)))
+    return paged_response(request, ordered_photos(request, collected))
 
 
 # ──────────────── Stream / Image Handlers ────────────────
@@ -609,6 +631,9 @@ async def handle_stream_original(request):
 def generate_test_video():
     if os.path.exists(TEST_VIDEO_PATH):
         return
+    import imageio
+    import numpy as np
+
     w, h, duration, fps = 640, 480, 3, 15
     frames = []
     for i in range(duration * fps):
@@ -823,6 +848,7 @@ def build_app():
     app.router.add_get("/p/api/v1/ai-person/photoLibrary/list", handle_person_photos)
     # Stream / Media
     app.router.add_get("/p/api/v1/stream/p/t/{id}/o/{uuid}", handle_stream_original)
+    app.router.add_get("/p/api/v1/stream/p/t/{id}/s/{uuid}", handle_stream_thumbnail)
     app.router.add_get("/p/api/v1/stream/v/{id}", handle_stream_video)
     app.router.add_get("/p/api/v1/stream/face/{faceId}", handle_face_image)
     # Cloud connect

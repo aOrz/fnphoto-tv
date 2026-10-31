@@ -3,7 +3,6 @@ package com.fnphoto.tv;
 import android.animation.ObjectAnimator;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.drawable.Drawable;
@@ -32,7 +31,6 @@ import com.fnphoto.tv.api.FnAuthUtils;
 import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.api.HttpClientProvider;
 import com.fnphoto.tv.cache.CachedImageLoader;
-import com.fnphoto.tv.cache.ImageCacheManager;
 import com.fnphoto.tv.player.AuthenticatedHttpDataSourceFactory;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.SimpleExoPlayer;
@@ -63,6 +61,14 @@ public class MediaDetailActivity extends FragmentActivity {
     private ImageView imageView;
     private PlayerView playerView;
     private SimpleExoPlayer player;
+    private android.media.MediaPlayer fallbackPlayer;
+    private final DetailLoadState loadState = new DetailLoadState();
+    private final DetailLoadState navigationState = new DetailLoadState();
+    private final DetailPlaybackState fallbackPlayback = new DetailPlaybackState();
+    private final List<CachedImageLoader.RequestHandle> preloads = new ArrayList<>();
+    private MediaPageController pageController;
+    private Call<FnHttpApi.PhotoDetailResponse> detailCall;
+    private boolean reloadOnStart;
     private View infoOverlay;
     private TextView tvInfoContent;
     private TextView tvSlideshowIndicator;
@@ -76,6 +82,7 @@ public class MediaDetailActivity extends FragmentActivity {
     private boolean isVideoPlaying = false;
     private MediaItem currentVideoItem;
     private boolean slideshowActive = false;
+    private boolean currentPhotoReady;
     private boolean infoVisible = false;
     private float currentScale = 1.0f;
     private boolean isZoomed = false;
@@ -97,7 +104,8 @@ public class MediaDetailActivity extends FragmentActivity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(container);
 
-        mediaList = (ArrayList<MediaItem>) MediaListHolder.get();
+        pageController = new MediaPageController(MediaListHolder.get(), MediaListHolder.getPageSource());
+        mediaList = pageController.getItems();
         MediaListHolder.clear();
         currentIndex = getIntent().getIntExtra("CURRENT_INDEX", 0);
 
@@ -127,8 +135,14 @@ public class MediaDetailActivity extends FragmentActivity {
         if (currentIndex < 0 || currentIndex >= mediaList.size()) return;
 
         MediaItem item = mediaList.get(currentIndex);
+        slideshowHandler.removeCallbacks(slideshowRunnable);
+        currentPhotoReady = false;
         Log.d(TAG, "Showing media: " + item.getTitle() + " type: " + item.getType());
 
+        loadState.next();
+        navigationState.next();
+        clearImageRequests();
+        releasePlayers();
         isVideoPlaying = false;
         currentVideoItem = null;
         currentScale = 1.0f;
@@ -138,13 +152,10 @@ public class MediaDetailActivity extends FragmentActivity {
         hideInfoOverlay();
         showLoading();
 
-        if (player != null) {
-            player.release();
-            player = null;
-        }
-
+        if (slideshowActive) showSlideshowIndicator(true);
         if ("video".equals(item.getType())) {
-            showVideoPreview(item);
+            if (slideshowActive) startVideoPlayback(item);
+            else showVideoPreview(item);
         } else {
             showPhoto(item);
         }
@@ -173,204 +184,128 @@ public class MediaDetailActivity extends FragmentActivity {
         }
     }
 
+    private ImageView createMediaImageView() {
+        ImageView view = new ImageView(this);
+        view.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        view.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        container.addView(view);
+        if (loadingIndicator != null) loadingIndicator.bringToFront();
+        imageView = view;
+        return view;
+    }
+
     private void showPhoto(MediaItem item) {
-        imageView = new ImageView(this);
-        imageView.setLayoutParams(new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
-        imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        container.addView(imageView);
-
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-
-        // 保持加载动画在最上层
-        if (loadingIndicator != null) {
-            loadingIndicator.bringToFront();
-        }
-
-        String mediaUrl = item.getMediaUrl();
-
-        // 检查原图是否已有缓存
-        ImageCacheManager cacheManager = ImageCacheManager.getInstance(this);
-        boolean originalCached = mediaUrl != null && !mediaUrl.isEmpty() && cacheManager.isCacheValid(mediaUrl);
-
-        if (originalCached) {
-            // 原图已缓存：直接加载，不要缩略图占位
-            CachedImageLoader.loadImage(this, mediaUrl, token, screenWidth, screenHeight,
-                    new CachedImageLoader.ImageLoadCallback() {
-                        @Override
-                        public void onBitmapLoaded(Bitmap bitmap) {
-                            hideLoading();
-                            imageView.setImageBitmap(bitmap);
-                        }
-                        @Override
-                        public void onLoadFailed() {
-                            hideLoading();
-                            Toast.makeText(MediaDetailActivity.this, "图片加载失败", Toast.LENGTH_SHORT).show();
-                        }
-                    });
-        } else {
-            // 原图未缓存：先显示缩略图占位，加载动画保持在最上层
-            String thumbUrl = item.getThumbnailUrl();
-            if (thumbUrl != null && !thumbUrl.isEmpty()) {
-                CachedImageLoader.loadImage(this, thumbUrl, token, screenWidth, screenHeight,
-                        new CachedImageLoader.ImageLoadCallback() {
-                            @Override
-                            public void onBitmapLoaded(Bitmap bitmap) {
-                                imageView.setImageBitmap(bitmap);
-                                // 缩略图设完后，重新把加载动画置于最上层
-                                if (loadingIndicator != null) {
-                                    loadingIndicator.bringToFront();
-                                }
-                            }
-                            @Override
-                            public void onLoadFailed() {}
-                        });
-            }
-
-            if (mediaUrl != null && !mediaUrl.isEmpty()) {
-                CachedImageLoader.loadImage(this, mediaUrl, token, screenWidth, screenHeight,
-                        new CachedImageLoader.ImageLoadCallback() {
-                            @Override
-                            public void onBitmapLoaded(Bitmap bitmap) {
-                                hideLoading();
-                                imageView.setImageBitmap(bitmap);
-                            }
-                            @Override
-                            public void onLoadFailed() {
-                                hideLoading();
-                                Toast.makeText(MediaDetailActivity.this, "图片加载失败", Toast.LENGTH_SHORT).show();
-                            }
-                        });
-            }
-        }
-
-        imageView.setOnClickListener(v -> finish());
-
-        // 预加载前后照片
+        final ImageView target = createMediaImageView();
+        final long generation = loadState.next();
+        String url = item.getMediaUrl();
+        if (url == null || url.isEmpty()) url = item.getThumbnailUrl();
+        CachedImageLoader.loadPhotoIntoImageView(target, url, item.getThumbnailUrl(), token,
+                new CachedImageLoader.LoadListener() {
+                    @Override public void onLoaded() {
+                        if (!loadState.isCurrent(generation) || imageView != target) return;
+                        hideLoading();
+                        currentPhotoReady = true;
+                        schedulePhotoSlideshow();
+                    }
+                    @Override public void onLoadFailed() {
+                        if (!loadState.isCurrent(generation) || imageView != target) return;
+                        hideLoading();
+                        currentPhotoReady = true;
+                        schedulePhotoSlideshow();
+                        Toast.makeText(MediaDetailActivity.this, "图片加载失败", Toast.LENGTH_SHORT).show();
+                    }
+                });
+        target.setOnClickListener(v -> finish());
         preloadAdjacentPhotos();
     }
 
     private void preloadAdjacentPhotos() {
-        if (mediaList == null) return;
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-        int preloadRange = 2;
+        // One bounded, lower-priority photo ahead. Never fetch a video as an image.
+        if (mediaList == null || currentIndex + 1 >= mediaList.size()) return;
+        MediaItem item = mediaList.get(currentIndex + 1);
+        if (!DetailLoadState.shouldPreload(item)) return;
+        int width = Math.min(1920, getResources().getDisplayMetrics().widthPixels);
+        int height = Math.min(1080, getResources().getDisplayMetrics().heightPixels);
+        preloads.add(CachedImageLoader.preloadImage(this, item.getMediaUrl(), token, width, height));
+    }
 
-        int start = Math.max(0, currentIndex - 1);
-        int end = Math.min(mediaList.size(), currentIndex + preloadRange + 1);
-        for (int idx = start; idx < end; idx++) {
-            if (idx == currentIndex) continue;
-            final int preloadIdx = idx;
-            MediaItem item = mediaList.get(preloadIdx);
-            String url = item.getMediaUrl();
-            if (url != null && !url.isEmpty()) {
-                ImageCacheManager cacheManager = ImageCacheManager.getInstance(this);
-                if (!cacheManager.isCacheValid(url)) {
-                    CachedImageLoader.loadImage(this, url, token, screenWidth, screenHeight,
-                            new CachedImageLoader.ImageLoadCallback() {
-                                @Override
-                                public void onBitmapLoaded(Bitmap bitmap) {
-                                    Log.d(TAG, "Preloaded photo " + preloadIdx + ": " + url);
-                                }
-                                @Override
-                                public void onLoadFailed() {}
-                            });
-                }
-            }
+    private void clearImageRequests() {
+        if (imageView != null) {
+            CachedImageLoader.clear(imageView);
+            imageView = null;
+        }
+        for (CachedImageLoader.RequestHandle handle : preloads) handle.clear();
+        preloads.clear();
+        if (detailCall != null) {
+            detailCall.cancel();
+            detailCall = null;
         }
     }
 
     private void showVideoPreview(MediaItem item) {
         currentVideoItem = item;
         String previewUrl = item.getThumbnailUrl();
-
         if (previewUrl == null || previewUrl.isEmpty()) {
             startVideoPlayback(item);
             return;
         }
-
-        imageView = new ImageView(this);
-        imageView.setLayoutParams(new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
-        imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        container.addView(imageView);
-
-        int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int screenHeight = getResources().getDisplayMetrics().heightPixels;
-
-        CachedImageLoader.loadImage(this, previewUrl, token, screenWidth, screenHeight,
-                new CachedImageLoader.ImageLoadCallback() {
-                    @Override
-                    public void onBitmapLoaded(Bitmap bitmap) {
-                        hideLoading();
-                        Bitmap composite = createVideoPreviewWithPlayButton(bitmap, screenWidth, screenHeight);
-                        imageView.setImageBitmap(composite);
+        final ImageView target = createMediaImageView();
+        final long generation = loadState.next();
+        // Overlay a small view instead of allocating another full-screen ARGB bitmap.
+        TextView playButton = new TextView(this);
+        playButton.setText("▶");
+        playButton.setTextSize(48);
+        playButton.setGravity(Gravity.CENTER);
+        playButton.setTextColor(Color.WHITE);
+        playButton.setBackgroundColor(0x66000000);
+        int buttonSize = (int) (88 * getResources().getDisplayMetrics().density);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(buttonSize, buttonSize, Gravity.CENTER);
+        container.addView(playButton, params);
+        CachedImageLoader.loadPhotoIntoImageView(target, previewUrl, null, token,
+                new CachedImageLoader.LoadListener() {
+                    @Override public void onLoaded() {
+                        if (loadState.isCurrent(generation) && imageView == target) hideLoading();
                     }
-
-                    @Override
-                    public void onLoadFailed() {
-                        hideLoading();
-                        startVideoPlayback(item);
+                    @Override public void onLoadFailed() {
+                        if (loadState.isCurrent(generation) && imageView == target) hideLoading();
                     }
                 });
-
-        imageView.setOnClickListener(v -> {
-            if (!isVideoPlaying) {
-                startVideoPlayback(item);
-            }
-        });
+        View.OnClickListener play = v -> {
+            if (loadState.isCurrent(generation) && !isVideoPlaying) startVideoPlayback(item);
+        };
+        target.setOnClickListener(play);
+        playButton.setOnClickListener(play);
     }
 
-    private Bitmap createVideoPreviewWithPlayButton(Bitmap thumbnail, int width, int height) {
-        Bitmap composite = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas canvas = new android.graphics.Canvas(composite);
-        android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        paint.setFilterBitmap(true);
-
-        int thumbWidth = thumbnail.getWidth();
-        int thumbHeight = thumbnail.getHeight();
-
-        float scale = Math.max((float) width / thumbWidth, (float) height / thumbHeight);
-        float srcLeft = Math.max(0, (thumbWidth - width / scale) / 2);
-        float srcTop = Math.max(0, (thumbHeight - height / scale) / 2);
-        float srcRight = Math.min(thumbWidth, srcLeft + width / scale);
-        float srcBottom = Math.min(thumbHeight, srcTop + height / scale);
-
-        android.graphics.Rect srcRect = new android.graphics.Rect((int) srcLeft, (int) srcTop, (int) srcRight, (int) srcBottom);
-        android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, width, height);
-        canvas.drawBitmap(thumbnail, srcRect, dstRect, paint);
-
-        paint.setColor(Color.parseColor("#60000000"));
-        canvas.drawRect(0, 0, width, height, paint);
-
-        int playButtonRadius = Math.min(width, height) / 16;
-        int centerX = width / 2;
-        int centerY = height / 2;
-
-        paint.setColor(Color.parseColor("#CCFFFFFF"));
-        paint.setStyle(android.graphics.Paint.Style.FILL);
-        canvas.drawCircle(centerX, centerY, playButtonRadius, paint);
-
-        paint.setColor(Color.parseColor("#FF0000"));
-        int triangleSize = playButtonRadius / 2;
-        android.graphics.Path path = new android.graphics.Path();
-        path.moveTo(centerX - triangleSize / 2, centerY - triangleSize);
-        path.lineTo(centerX - triangleSize / 2, centerY + triangleSize);
-        path.lineTo(centerX + triangleSize, centerY);
-        path.close();
-        canvas.drawPath(path, paint);
-
-        return composite;
+    private void releasePlayers() {
+        fallbackPlayback.reset();
+        if (playerView != null) playerView.setPlayer(null);
+        if (player != null) {
+            player.release();
+            player = null;
+        }
+        if (fallbackPlayer != null) {
+            android.media.MediaPlayer old = fallbackPlayer;
+            fallbackPlayer = null;
+            old.setOnPreparedListener(null);
+            old.setOnErrorListener(null);
+            old.setOnCompletionListener(null);
+            old.release();
+        }
+        playerView = null;
     }
 
     private void startVideoPlayback(MediaItem item) {
+        loadState.next();
+        clearImageRequests();
+        releasePlayers();
         isVideoPlaying = true;
         currentVideoItem = item;
 
         container.removeAllViews();
+        showLoading();
+        if (slideshowActive) showSlideshowIndicator(true);
 
         String videoId = item.getId();
         String videoUrl = baseUrl + "/p/api/v1/stream/v/" + videoId;
@@ -395,9 +330,12 @@ public class MediaDetailActivity extends FragmentActivity {
             AuthenticatedHttpDataSourceFactory dataSourceFactory =
                     new AuthenticatedHttpDataSourceFactory(this, "ExoPlayer");
 
+            final SimpleExoPlayer requestedPlayer = player;
+            final long generation = loadState.next();
             player.addListener(new Player.DefaultEventListener() {
                 @Override
                 public void onPlayerError(com.google.android.exoplayer2.ExoPlaybackException error) {
+                    if (!loadState.isCurrent(generation) || player != requestedPlayer) return;
                     Log.e(TAG, "ExoPlayer error, falling back to MediaPlayer", error);
                     hideLoading();
                     if (player != null) {
@@ -408,11 +346,14 @@ public class MediaDetailActivity extends FragmentActivity {
                         container.removeView(playerView);
                         playerView = null;
                     }
+                    showLoading();
                     setupMediaPlayer(videoUrl);
                 }
 
                 @Override
                 public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+                    if (!loadState.isCurrent(generation) || player != requestedPlayer) return;
+                    if (playbackState == Player.STATE_READY) hideLoading();
                     if (playbackState == Player.STATE_ENDED) {
                         if (slideshowActive) {
                             switchToNext();
@@ -450,6 +391,9 @@ public class MediaDetailActivity extends FragmentActivity {
             container.addView(sv);
 
             final android.media.MediaPlayer mp = new android.media.MediaPlayer();
+            fallbackPlayer = mp;
+            fallbackPlayback.reset();
+            final long generation = loadState.next();
             java.util.Map<String, String> headers = new java.util.HashMap<>();
             headers.put("accesstoken", token != null ? token : "");
             mp.setDataSource(this, android.net.Uri.parse(videoUrl), headers);
@@ -457,33 +401,50 @@ public class MediaDetailActivity extends FragmentActivity {
             sv.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
                 @Override
                 public void surfaceCreated(android.view.SurfaceHolder holder) {
+                    if (!loadState.isCurrent(generation) || fallbackPlayer != mp) return;
                     mp.setDisplay(holder);
                     mp.prepareAsync();
                 }
                 @Override
                 public void surfaceChanged(android.view.SurfaceHolder holder, int format, int w, int h) {}
                 @Override
-                public void surfaceDestroyed(android.view.SurfaceHolder holder) {}
+                public void surfaceDestroyed(android.view.SurfaceHolder holder) {
+                    if (fallbackPlayer == mp) {
+                        fallbackPlayer = null;
+                        fallbackPlayback.reset();
+                        mp.release();
+                    }
+                }
             });
 
             mp.setOnPreparedListener(mp2 -> {
+                if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
                 hideLoading();
-                mp2.start();
+                fallbackPlayback.prepared();
+                if (fallbackPlayback.shouldPlay()) mp2.start();
             });
             mp.setOnErrorListener((mp2, what, extra) -> {
+                if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return true;
                 Log.e(TAG, "MediaPlayer error: what=" + what + " extra=" + extra);
                 hideLoading();
                 Toast.makeText(MediaDetailActivity.this,
                         "视频播放失败", Toast.LENGTH_LONG).show();
+                releasePlayers();
+                isVideoPlaying = false;
+                if (slideshowActive) stopSlideshow();
                 return true;
             });
             mp.setOnCompletionListener(mp2 -> {
+                if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
                 if (slideshowActive) {
                     switchToNext();
                 }
             });
         } catch (Exception e) {
             Log.e(TAG, "MediaPlayer init failed", e);
+            releasePlayers();
+            isVideoPlaying = false;
+            if (slideshowActive) stopSlideshow();
             hideLoading();
             Toast.makeText(MediaDetailActivity.this,
                     "视频播放失败", Toast.LENGTH_LONG).show();
@@ -513,19 +474,42 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void switchToNext() {
-        if (!canSwitch) return;
+        if (!canSwitch && !slideshowActive) return;
         if (currentIndex < mediaList.size() - 1) {
             currentIndex++;
             showCurrentMedia();
             if (!slideshowActive) debounceSwitch();
+        } else if (pageController != null && pageController.hasMore()) {
+            if (pageController.isLoading()) return;
+            final long generation = loadState.current();
+            final long navigation = navigationState.current();
+            showLoading();
+            pageController.ensureNext(currentIndex, new MediaPageController.Callback() {
+                @Override public void onReady(boolean nextAvailable) {
+                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                    hideLoading();
+                    if (nextAvailable) switchToNext();
+                    else finishNavigation();
+                }
+                @Override public void onFailure() {
+                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                    hideLoading();
+                    if (slideshowActive) stopSlideshow();
+                    Toast.makeText(MediaDetailActivity.this, "加载下一页失败，按右键重试", Toast.LENGTH_LONG).show();
+                }
+            });
         } else {
+            finishNavigation();
+        }
+    }
+
+    private void finishNavigation() {
             if (slideshowActive) {
                 stopSlideshow();
                 Toast.makeText(this, "幻灯片播放结束", Toast.LENGTH_SHORT).show();
             } else {
                 Toast.makeText(this, "已经是最后一个", Toast.LENGTH_SHORT).show();
             }
-        }
     }
 
     private void debounceSwitch() {
@@ -542,32 +526,39 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void startSlideshow() {
-        if (mediaList.size() <= 1) {
+        if (mediaList.size() <= 1 && (pageController == null || !pageController.hasMore())) {
             Toast.makeText(this, "需要至少2张照片才能播放幻灯片", Toast.LENGTH_SHORT).show();
             return;
         }
         slideshowActive = true;
+        canSwitch = true;
+        debounceHandler.removeCallbacksAndMessages(null);
         showSlideshowIndicator(true);
+        if (currentVideoItem != null && !isVideoPlaying) startVideoPlayback(currentVideoItem);
+        else schedulePhotoSlideshow();
         Toast.makeText(this, "幻灯片已开始", Toast.LENGTH_SHORT).show();
-        slideshowHandler.postDelayed(slideshowRunnable, SLIDESHOW_INTERVAL);
     }
 
     private void stopSlideshow() {
+        navigationState.next();
+        if (pageController != null && pageController.isLoading()) hideLoading();
         slideshowActive = false;
         slideshowHandler.removeCallbacks(slideshowRunnable);
         showSlideshowIndicator(false);
         Toast.makeText(this, "幻灯片已停止", Toast.LENGTH_SHORT).show();
     }
 
+    private void schedulePhotoSlideshow() {
+        slideshowHandler.removeCallbacks(slideshowRunnable);
+        if (slideshowActive && !isVideoPlaying && currentPhotoReady) {
+            slideshowHandler.postDelayed(slideshowRunnable, SLIDESHOW_INTERVAL);
+        }
+    }
+
     private final Runnable slideshowRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (slideshowActive) {
-                switchToNext();
-                if (slideshowActive) {
-                    slideshowHandler.postDelayed(this, SLIDESHOW_INTERVAL);
-                }
-            }
+        @Override public void run() {
+            if (slideshowActive && !isVideoPlaying) switchToNext();
+            // The next photo schedules its own full interval after loading. Videos advance on ended.
         }
     };
 
@@ -648,10 +639,14 @@ public class MediaDetailActivity extends FragmentActivity {
 
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/detail/" + photoId, "GET", null);
 
-        api.getPhotoDetail(token, authx, photoId).enqueue(new Callback<FnHttpApi.PhotoDetailResponse>() {
+        if (detailCall != null) detailCall.cancel();
+        final long generation = loadState.current();
+        detailCall = api.getPhotoDetail(token, authx, photoId);
+        detailCall.enqueue(new Callback<FnHttpApi.PhotoDetailResponse>() {
             @Override
             public void onResponse(Call<FnHttpApi.PhotoDetailResponse> call,
                                    Response<FnHttpApi.PhotoDetailResponse> response) {
+                if (!loadState.isCurrent(generation) || !infoVisible || call.isCanceled()) return;
                 if (response.isSuccessful() && response.body() != null) {
                     FnHttpApi.PhotoDetailResponse result = response.body();
                     if (result.code == 0 && result.data != null && result.data.info != null) {
@@ -666,6 +661,7 @@ public class MediaDetailActivity extends FragmentActivity {
 
             @Override
             public void onFailure(Call<FnHttpApi.PhotoDetailResponse> call, Throwable t) {
+                if (!loadState.isCurrent(generation) || !infoVisible || call.isCanceled()) return;
                 tvInfoContent.setText("网络错误: " + t.getMessage());
             }
         });
@@ -728,6 +724,10 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void hideInfoOverlay() {
+        if (detailCall != null) {
+            detailCall.cancel();
+            detailCall = null;
+        }
         if (infoOverlay != null) {
             infoOverlay.setVisibility(View.GONE);
         }
@@ -859,6 +859,8 @@ public class MediaDetailActivity extends FragmentActivity {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
                 if (player != null) {
                     player.setPlayWhenReady(!player.getPlayWhenReady());
+                } else if (fallbackPlayer != null) {
+                    toggleFallbackPlayback();
                 }
                 return true;
             case KeyEvent.KEYCODE_INFO:
@@ -875,12 +877,21 @@ public class MediaDetailActivity extends FragmentActivity {
         return super.onKeyDown(keyCode, event);
     }
 
+    private void toggleFallbackPlayback() {
+        fallbackPlayback.toggle();
+        if (fallbackPlayer == null || !fallbackPlayback.isPrepared()) return;
+        if (fallbackPlayback.shouldPlay()) fallbackPlayer.start();
+        else fallbackPlayer.pause();
+    }
+
     private void handleOkKey() {
         if (player != null && isVideoPlaying) {
             boolean isPlaying = player.getPlayWhenReady();
             player.setPlayWhenReady(!isPlaying);
             String message = isPlaying ? "已暂停" : "继续播放";
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+        } else if (fallbackPlayer != null && isVideoPlaying) {
+            toggleFallbackPlayback();
         } else if (currentVideoItem != null && !isVideoPlaying) {
             startVideoPlayback(currentVideoItem);
         } else if (!isVideoPlaying) {
@@ -889,13 +900,37 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (player != null) {
-            player.release();
-            player = null;
+    protected void onStart() {
+        super.onStart();
+        if (reloadOnStart && mediaList != null && !mediaList.isEmpty()) {
+            reloadOnStart = false;
+            showCurrentMedia();
         }
+    }
+
+    @Override
+    protected void onStop() {
+        loadState.next();
+        navigationState.next();
+        clearImageRequests();
+        releasePlayers();
+        slideshowActive = false;
         slideshowHandler.removeCallbacksAndMessages(null);
         debounceHandler.removeCallbacksAndMessages(null);
+        canSwitch = true;
+        reloadOnStart = true;
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        loadState.close();
+        navigationState.close();
+        if (pageController != null) pageController.close();
+        clearImageRequests();
+        releasePlayers();
+        slideshowHandler.removeCallbacksAndMessages(null);
+        debounceHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 }

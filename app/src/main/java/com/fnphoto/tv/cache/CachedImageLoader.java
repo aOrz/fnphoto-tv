@@ -1,199 +1,135 @@
 package com.fnphoto.tv.cache;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
-import android.util.Log;
-
+import android.widget.ImageView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-
 import com.bumptech.glide.Glide;
+import com.bumptech.glide.Priority;
+import com.bumptech.glide.RequestBuilder;
+import com.bumptech.glide.RequestManager;
+import com.bumptech.glide.load.DataSource;
+import com.bumptech.glide.load.engine.GlideException;
 import com.bumptech.glide.load.model.GlideUrl;
 import com.bumptech.glide.load.model.LazyHeaders;
+import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.target.CustomTarget;
+import com.bumptech.glide.request.target.Target;
 import com.bumptech.glide.request.transition.Transition;
 
-import java.io.File;
+/** One asynchronous, size-aware cache pipeline. Never decode or scan disk on the UI thread. */
+public final class CachedImageLoader {
+    private CachedImageLoader() {}
 
-public class CachedImageLoader {
-    private static final String TAG = "CachedImageLoader";
-
-    private static String getFreshToken(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
-        return prefs.getString("api_token", "");
+    private static GlideUrl model(Context context, String url, String fallbackToken) {
+        String token = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE)
+                .getString("api_token", fallbackToken == null ? "" : fallbackToken);
+        return new GlideUrl(url, new LazyHeaders.Builder().addHeader("accesstoken", token).build());
     }
-    
+
     public interface ImageLoadCallback {
         void onBitmapLoaded(Bitmap bitmap);
         void onLoadFailed();
+        /** Drop all references to Glide-owned bitmaps here. Never recycle them yourself. */
+        default void onLoadCleared() {}
     }
-    
-    /**
-     * 加载图片（带缓存）
-     * @param context 上下文
-     * @param url 图片URL
-     * @param token 认证token
-     * @param width 目标宽度
-     * @param height 目标高度
-     * @param callback 回调
-     */
-    public static void loadImage(Context context, String url, String token, 
-                                  int width, int height, ImageLoadCallback callback) {
-        ImageCacheManager cacheManager = ImageCacheManager.getInstance(context);
-        
-        // 1. 先检查内存/磁盘缓存
-        Bitmap cachedBitmap = cacheManager.getCachedBitmap(url);
-        if (cachedBitmap != null && !cachedBitmap.isRecycled()) {
-            Log.d(TAG, "Using cached image for: " + url);
-            callback.onBitmapLoaded(cachedBitmap);
-            return;
+
+    public interface LoadListener {
+        void onLoaded();
+        void onLoadFailed();
+    }
+
+    /** Clear on the main thread when a custom target is no longer displayed/needed. */
+    public static final class RequestHandle {
+        private RequestManager manager;
+        private Target<?> target;
+        private RequestHandle(RequestManager manager, Target<?> target) {
+            this.manager = manager;
+            this.target = target;
         }
-        
-        // 2. 检查缓存文件（用于Glide直接从文件加载）
-        File cacheFile = cacheManager.getCacheFile(url);
-        if (cacheFile != null) {
-            // 从缓存文件加载
-            Log.d(TAG, "Loading from cache file: " + url);
-            Glide.with(context)
-                    .asBitmap()
-                    .load(cacheFile)
-                    .override(width, height)
-                    .into(new CustomTarget<Bitmap>() {
-                        @Override
-                        public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
-                            callback.onBitmapLoaded(resource);
-                        }
-                        
-                        @Override
-                        public void onLoadCleared(@Nullable Drawable placeholder) {}
-                        
-                        @Override
-                        public void onLoadFailed(@Nullable Drawable errorDrawable) {
-                            // 缓存文件损坏，从网络加载
-                            loadFromNetwork(context, url, token, width, height, callback);
-                        }
-                    });
-            return;
-        }
-        
-        // 3. 从网络加载
-        loadFromNetwork(context, url, token, width, height, callback);
-    }
-    
-    /**
-     * 从网络加载并缓存
-     */
-    private static void loadFromNetwork(Context context, String url, String token,
-                                        int width, int height, ImageLoadCallback callback) {
-        Log.d(TAG, "Loading from network: " + url);
-        
-        String freshToken = getFreshToken(context);
-        ImageCacheManager cacheManager = ImageCacheManager.getInstance(context);
-        
-        GlideUrl glideUrl = new GlideUrl(url, new LazyHeaders.Builder()
-                .addHeader("accesstoken", freshToken)
-                .build());
-        
-        Glide.with(context)
-                .asBitmap()
-                .load(glideUrl)
-                .override(width, height)
-                .into(new CustomTarget<Bitmap>() {
-                    @Override
-                    public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
-                        // 保存到缓存
-                        cacheManager.saveBitmapToCache(url, resource);
-                        callback.onBitmapLoaded(resource);
-                    }
-                    
-                    @Override
-                    public void onLoadCleared(@Nullable Drawable placeholder) {}
-                    
-                    @Override
-                    public void onLoadFailed(@Nullable Drawable errorDrawable) {
-                        Log.e(TAG, "Failed to load image: " + url);
-                        callback.onLoadFailed();
-                    }
-                });
-    }
-    
-    /**
-     * 加载单张图片到ImageView（使用Glide的标准方式，但会先检查缓存）
-     */
-    public static void loadIntoImageView(android.widget.ImageView imageView, String url, String token) {
-        Context context = imageView.getContext();
-        String freshToken = getFreshToken(context);
-        ImageCacheManager cacheManager = ImageCacheManager.getInstance(context);
-        
-        // 检查缓存文件
-        File cacheFile = cacheManager.getCacheFile(url);
-        if (cacheFile != null) {
-            // 从缓存加载
-            Glide.with(context)
-                    .load(cacheFile)
-                    .centerCrop()
-                    .into(imageView);
-        } else {
-            // 从网络加载
-            GlideUrl glideUrl = new GlideUrl(url, new LazyHeaders.Builder()
-                    .addHeader("accesstoken", freshToken)
-                    .build());
-            
-            Glide.with(context)
-                    .load(glideUrl)
-                    .centerCrop()
-                    .into(new com.bumptech.glide.request.target.DrawableImageViewTarget(imageView) {
-                        @Override
-                        public void onResourceReady(@NonNull Drawable resource, @Nullable Transition<? super Drawable> transition) {
-                            super.onResourceReady(resource, transition);
-                            // 下载完成后保存到缓存（Glide会自动处理）
-                        }
-                    });
+        public void clear() {
+            if (target != null) {
+                Target<?> old = target;
+                target = null;
+                manager.clear(old);
+                manager = null;
+            }
         }
     }
-    
-    /**
-     * 预加载图片到缓存
-     */
-    public static void preloadImage(Context context, String url, String token) {
-        String freshToken = getFreshToken(context);
-        ImageCacheManager cacheManager = ImageCacheManager.getInstance(context);
-        
-        // 如果缓存不存在，从网络加载并缓存
-        if (!cacheManager.isCacheValid(url)) {
-            GlideUrl glideUrl = new GlideUrl(url, new LazyHeaders.Builder()
-                    .addHeader("accesstoken", freshToken)
-                    .build());
-            
-            Glide.with(context)
-                    .asBitmap()
-                    .load(glideUrl)
-                    .into(new CustomTarget<Bitmap>() {
-                        @Override
-                        public void onResourceReady(@NonNull Bitmap resource, @Nullable Transition<? super Bitmap> transition) {
-                            cacheManager.saveBitmapToCache(url, resource);
-                        }
-                        
-                        @Override
-                        public void onLoadCleared(@Nullable Drawable placeholder) {}
-                    });
+
+    public static RequestHandle loadImage(Context context, String url, String token,
+            int width, int height, ImageLoadCallback callback) {
+        RequestManager manager = Glide.with(context);
+        // A not-yet-measured view must never accidentally request SIZE_ORIGINAL.
+        int safeWidth = ImageDimensions.safeWidth(width);
+        int safeHeight = ImageDimensions.safeHeight(height);
+        CustomTarget<Bitmap> target = new CustomTarget<Bitmap>(safeWidth, safeHeight) {
+            @Override public void onResourceReady(@NonNull Bitmap resource,
+                    @Nullable Transition<? super Bitmap> transition) {
+                callback.onBitmapLoaded(resource);
+            }
+            @Override public void onLoadFailed(@Nullable Drawable errorDrawable) {
+                callback.onLoadFailed();
+            }
+            @Override public void onLoadCleared(@Nullable Drawable placeholder) {
+                callback.onLoadCleared();
+            }
+        };
+        manager.asBitmap().disallowHardwareConfig().load(url == null || url.isEmpty() ? null : model(context, url, token))
+                .override(safeWidth, safeHeight).into(target);
+        return new RequestHandle(manager, target);
+    }
+
+    public static void loadIntoImageView(ImageView view, String url, String token) {
+        Glide.with(view.getContext()).load(url == null || url.isEmpty() ? null : model(view.getContext(), url, token))
+                .centerCrop().placeholder(android.R.drawable.ic_menu_gallery)
+                .error(android.R.drawable.ic_menu_gallery).into(view);
+    }
+
+    /** The thumbnail belongs to the same request: it cannot overwrite a completed full image. */
+    public static void loadPhotoIntoImageView(ImageView view, String url, String thumbnailUrl,
+            String token, @Nullable LoadListener listener) {
+        RequestManager manager = Glide.with(view.getContext());
+        RequestBuilder<Drawable> full = manager.load(url == null || url.isEmpty() ? null
+                : model(view.getContext(), url, token)).fitCenter();
+        if (thumbnailUrl != null && !thumbnailUrl.isEmpty() && !thumbnailUrl.equals(url)) {
+            full = full.thumbnail(manager.load(model(view.getContext(), thumbnailUrl, token)).fitCenter());
         }
+        full.listener(new RequestListener<Drawable>() {
+            @Override public boolean onLoadFailed(@Nullable GlideException e, Object model,
+                    Target<Drawable> target, boolean isFirstResource) {
+                if (listener != null) listener.onLoadFailed();
+                return false;
+            }
+            @Override public boolean onResourceReady(Drawable resource, Object model,
+                    Target<Drawable> target, DataSource source, boolean isFirstResource) {
+                if (listener != null) listener.onLoaded();
+                return false;
+            }
+        }).into(view);
     }
-    
-    /**
-     * 清空所有图片缓存
-     */
-    public static void clearAllCache(Context context) {
-        ImageCacheManager.getInstance(context).clearCache();
+
+    public static void clear(ImageView view) {
+        if (view == null) return;
+        // Application manager can clear a target even during late holder recycling after Activity destruction.
+        Glide.with(view.getContext().getApplicationContext()).clear(view);
+        view.setImageDrawable(null);
     }
-    
-    /**
-     * 获取缓存大小（MB）
-     */
-    public static float getCacheSizeMB(Context context) {
-        long bytes = ImageCacheManager.getInstance(context).getCacheSize();
-        return bytes / (1024f * 1024f);
+
+    public static RequestHandle preloadImage(Context context, String url, String token, int width, int height) {
+        RequestManager manager = Glide.with(context);
+        Target<Drawable> target = manager.load(url == null || url.isEmpty() ? null : model(context, url, token))
+                .fitCenter().priority(Priority.LOW)
+                .preload(ImageDimensions.safeWidth(width), ImageDimensions.safeHeight(height));
+        return new RequestHandle(manager, target);
+    }
+
+    public static void clearAllCache(Context context, ImageCacheManager.CompletionCallback callback) {
+        ImageCacheManager.getInstance(context).clearCache(callback);
+    }
+    public static void getCacheSizeAsync(Context context, ImageCacheManager.SizeCallback callback) {
+        ImageCacheManager.getInstance(context).getCacheSizeAsync(callback);
     }
 }

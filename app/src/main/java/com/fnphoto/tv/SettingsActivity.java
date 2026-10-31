@@ -35,6 +35,8 @@ public class SettingsActivity extends FragmentActivity {
 
     private LinearLayout contentLayout;
     private SharedPreferences prefs;
+    private boolean destroyed;
+    private int cacheGeneration;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -106,9 +108,16 @@ public class SettingsActivity extends FragmentActivity {
         actionLp.bottomMargin = dp(4);
         action.setLayoutParams(actionLp);
         action.setOnClickListener(v -> {
-            CachedImageLoader.clearAllCache(this);
-            Toast.makeText(this, "缓存已清空", Toast.LENGTH_SHORT).show();
-            refreshCacheSize();
+            action.setEnabled(false);
+            action.setText("正在清理...");
+            cacheGeneration++;
+            CachedImageLoader.clearAllCache(this, success -> {
+                if (destroyed) return;
+                action.setEnabled(true);
+                action.setText("清空图片缓存");
+                Toast.makeText(this, success ? "缓存清理完成" : "部分缓存未能清理，请重试", Toast.LENGTH_SHORT).show();
+                refreshCacheSize();
+            });
         });
         actionCard.addView(action);
         contentLayout.addView(actionCard);
@@ -196,7 +205,7 @@ public class SettingsActivity extends FragmentActivity {
         row.setMinimumHeight(dp(54));
 
         TextView tvLabel = new TextView(this);
-        tvLabel.setText("缓存大小");
+        tvLabel.setText("图片磁盘缓存");
         tvLabel.setTextColor(TEXT_SECONDARY);
         tvLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         tvLabel.setLayoutParams(new LinearLayout.LayoutParams(dp(260),
@@ -218,9 +227,21 @@ public class SettingsActivity extends FragmentActivity {
 
     private void refreshCacheSize() {
         if (tvCacheSize != null) {
-            float sizeMB = CachedImageLoader.getCacheSizeMB(this);
-            tvCacheSize.setText(sizeMB > 0.1f ? String.format("%.1f MB", sizeMB) : "无缓存");
+            final int generation = ++cacheGeneration;
+            tvCacheSize.setText("统计中...");
+            CachedImageLoader.getCacheSizeAsync(this, bytes -> {
+                if (destroyed || generation != cacheGeneration) return;
+                float sizeMB = bytes / (1024f * 1024f);
+                tvCacheSize.setText(bytes > 0 ? String.format("%.1f MB", sizeMB) : "无缓存");
+            });
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        destroyed = true;
+        cacheGeneration++;
+        super.onDestroy();
     }
 
     private int dp(int value) {
