@@ -43,8 +43,6 @@ import retrofit2.converter.gson.GsonConverterFactory;
  * 支持混合视图：文件夹列表 + 照片墙
  */
 public class FolderBrowseActivity extends FragmentActivity {
-    private static final int GRID_SPAN_COUNT = 6; // 照片墙每行显示6个
-    private static final int FOLDER_GRID_SPAN_COUNT = 4; // 文件夹每行显示4个
     private static final int PAGE_LIMIT = 100; // 每页加载数量
 
     private TextView tvTitle;
@@ -178,7 +176,8 @@ public class FolderBrowseActivity extends FragmentActivity {
         rvFolders.setVisibility(View.GONE);
         folderAdapter = new FolderAdapter();
         rvFolders.setAdapter(folderAdapter);
-        rvFolders.setLayoutManager(new GridLayoutManager(this, FOLDER_GRID_SPAN_COUNT));
+        // Directory cards also need room for their icon and a readable name.
+        rvFolders.setLayoutManager(new AdaptiveGridLayoutManager(this, 240, 4));
         layoutContent.addView(rvFolders);
 
         // 照片墙区域
@@ -203,7 +202,7 @@ public class FolderBrowseActivity extends FragmentActivity {
         rvPhotos.setVisibility(View.GONE);
         photoAdapter = new PhotoGridAdapter();
         rvPhotos.setAdapter(photoAdapter);
-        rvPhotos.setLayoutManager(new GridLayoutManager(this, GRID_SPAN_COUNT));
+        rvPhotos.setLayoutManager(new AdaptiveGridLayoutManager(this));
         rvPhotos.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override public void onScrolled(RecyclerView view, int dx, int dy) {
                 GridLayoutManager manager = (GridLayoutManager) view.getLayoutManager();
@@ -568,6 +567,24 @@ public class FolderBrowseActivity extends FragmentActivity {
                 super(itemView);
                 ivPhoto = itemView.findViewById(R.id.iv_photo);
                 vVideoIndicator = itemView.findViewById(R.id.v_video_indicator);
+
+                // The XML supplies a fallback height until the grid assigns the real span width.
+                // Update only on a width change, including when a pooled holder enters a new size.
+                itemView.addOnLayoutChangeListener((v, left, top, right, bottom,
+                        oldLeft, oldTop, oldRight, oldBottom) -> {
+                    if (right - left == oldRight - oldLeft) return;
+                    // RecyclerView defers layout requests during its own layout pass.
+                    v.post(() -> {
+                        int width = v.getWidth() - v.getPaddingLeft() - v.getPaddingRight();
+                        if (width <= 0) return;
+                        int height = Math.max(1, Math.round(width * 9f / 16f));
+                        ViewGroup.LayoutParams params = ivPhoto.getLayoutParams();
+                        if (params.height != height) {
+                            params.height = height;
+                            ivPhoto.setLayoutParams(params);
+                        }
+                    });
+                });
 
                 itemView.setOnClickListener(v -> {
                     int pos = getAdapterPosition();

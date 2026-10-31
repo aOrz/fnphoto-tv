@@ -42,7 +42,6 @@ import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
 public class SearchActivity extends FragmentActivity {
-    private static final int GRID_SPAN = 6;
     private static final int SEARCH_DELAY = 500;
     private static final int PAGE_LIMIT = 100;
 
@@ -170,7 +169,7 @@ public class SearchActivity extends FragmentActivity {
         rvResults.setLayoutParams(gridLp);
         rvResults.setClipToPadding(false);
         rvResults.setPadding(dp(48), dp(8), dp(48), dp(40));
-        rvResults.setLayoutManager(new GridLayoutManager(this, GRID_SPAN));
+        rvResults.setLayoutManager(new AdaptiveGridLayoutManager(this));
 
         adapter = new SearchAdapter();
         rvResults.setAdapter(adapter);
@@ -385,11 +384,28 @@ public class SearchActivity extends FragmentActivity {
 
         @Override
         public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-            ImageView imageView = new ImageView(SearchActivity.this);
-            imageView.setLayoutParams(new ViewGroup.LayoutParams(320, 240));
+            ImageView imageView = new androidx.appcompat.widget.AppCompatImageView(SearchActivity.this) {
+                @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                    // GridLayoutManager may remeasure a row to its tallest cell (rounding by 1px).
+                    if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.EXACTLY) {
+                        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+                        return;
+                    }
+                    int width = View.MeasureSpec.getSize(widthMeasureSpec);
+                    int imageWidth = Math.max(1, width - getPaddingLeft() - getPaddingRight());
+                    int height = Math.max(1, Math.round(imageWidth * 3f / 4f))
+                            + getPaddingTop() + getPaddingBottom();
+                    super.onMeasure(widthMeasureSpec,
+                            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+                }
+            };
+            imageView.setLayoutParams(new RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            imageView.setPadding(4, 4, 4, 4);
+            imageView.setPadding(dp(4), dp(4), dp(4), dp(4));
             imageView.setBackgroundColor(Color.parseColor("#333333"));
+            imageView.setFocusable(true);
+            imageView.setFocusableInTouchMode(true);
             return new ViewHolder(imageView);
         }
 

@@ -98,6 +98,9 @@ public class MainFragment extends BrowseSupportFragment {
     private String baseUrl;
     private ArrayObjectAdapter mRowsAdapter;
     private CardPresenter mCardPresenter;
+    private PhotoWallLayout wallLayout;
+    private MediaItem selectedWallItem;
+    private boolean reflowingWall;
     private List<FnHttpApi.TimelineItem> timelineItems;
     private boolean isPhotoListView = false;
     private boolean favoritesTimeline;
@@ -266,6 +269,8 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void beginScreen() {
+        reflowingWall = false;
+        selectedWallItem = null;
         requests.next();
         lazyLoadHandler.removeCallbacksAndMessages(null);
         positionHandler.removeCallbacksAndMessages(null);
@@ -364,8 +369,76 @@ public class MainFragment extends BrowseSupportFragment {
         setSearchAffordanceColor(getResources().getColor(android.R.color.transparent));
         
         mCardPresenter = new CardPresenter(baseUrl);
-        mRowsAdapter = new ArrayObjectAdapter(new ListRowPresenter());
+        wallLayout = calculateWallLayout(getResources().getDisplayMetrics().widthPixels);
+        mCardPresenter.setWallLayout(wallLayout);
+        mRowsAdapter = new ArrayObjectAdapter(new PhotoWallRowPresenter(width ->
+                positionHandler.post(() -> updateWallWidth(width))));
         setAdapter(mRowsAdapter);
+    }
+
+    private PhotoWallLayout calculateWallLayout(int width) {
+        float density = getResources().getDisplayMetrics().density;
+        int padding = Math.round(PhotoWallRowPresenter.SIDE_PADDING_DP * density);
+        return PhotoWallLayout.calculate(width, padding, padding,
+                Math.round(PhotoWallRowPresenter.GAP_DP * density), density);
+    }
+
+    private void updateWallWidth(int width) {
+        if (!isAdded() || getView() == null || width <= 0) return;
+        PhotoWallLayout next = calculateWallLayout(width);
+        if (next.columns == wallLayout.columns && next.cardWidthPx == wallLayout.cardWidthPx) return;
+        boolean columnsChanged = next.columns != wallLayout.columns;
+        wallLayout = next;
+        mCardPresenter.setWallLayout(next);
+        if (!columnsChanged) {
+            for (int i = 0; i < mRowsAdapter.size(); i++) {
+                ArrayObjectAdapter cards = (ArrayObjectAdapter) ((ListRow) mRowsAdapter.get(i)).getAdapter();
+                cards.notifyItemRangeChanged(0, cards.size());
+            }
+            return;
+        }
+
+        // Keep the same MediaItems, request generations, offsets and preview cache. Rebuilding
+        // a screen via displayTimeline/loadPhotos would restart requests and lose selection.
+        MediaItem selection = selectedWallItem;
+        Object pagedTail = pagedLastRow == null || pagedLastRow.size() == 0 ? null
+                : pagedLastRow.get(pagedLastRow.size() - 1);
+        List<PhotoWallRows.Row<MediaItem, HeaderItem>> source = new ArrayList<>();
+        for (int i = 0; i < mRowsAdapter.size(); i++) {
+            ListRow row = (ListRow) mRowsAdapter.get(i);
+            List<MediaItem> items = new ArrayList<>();
+            for (int j = 0; j < row.getAdapter().size(); j++) items.add((MediaItem) row.getAdapter().get(j));
+            source.add(new PhotoWallRows.Row<>(row.getHeaderItem(), items, row == pageFooter));
+        }
+        List<ListRow> replacement = new ArrayList<>();
+        previewRows.clear();
+        pagedLastRow = null;
+        int selectedRow = -1;
+        int selectedColumn = -1;
+        for (PhotoWallRows.Row<MediaItem, HeaderItem> row : PhotoWallRows.reflow(source, next.columns)) {
+            ArrayObjectAdapter cards = row.fixed ? pageFooterAdapter : new ArrayObjectAdapter(mCardPresenter);
+            if (!row.fixed) cards.addAll(0, row.items);
+            for (int column = 0; column < row.items.size(); column++) {
+                MediaItem item = row.items.get(column);
+                if ("date".equals(item.getType()) || "person_date".equals(item.getType())) previewRows.put(item, cards);
+                if (item == pagedTail) pagedLastRow = cards;
+                if (item == selection) {
+                    selectedRow = replacement.size();
+                    selectedColumn = column;
+                }
+            }
+            replacement.add(row.fixed ? pageFooter : new ListRow(row.header, cards));
+        }
+        reflowingWall = true;
+        mRowsAdapter.clear();
+        mRowsAdapter.addAll(0, replacement);
+        final int row = selectedRow, column = selectedColumn;
+        final long generation = requests.generation();
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation)) return;
+            restoreCardSelection(row, column);
+            reflowingWall = false;
+        });
     }
 
     private void setupEventListeners() {
@@ -422,7 +495,9 @@ public class MainFragment extends BrowseSupportFragment {
             public void onItemSelected(Presenter.ViewHolder itemViewHolder, Object item,
                                        RowPresenter.ViewHolder rowViewHolder, Row row) {
                 if (item instanceof MediaItem) {
+                    if (reflowingWall) return;
                     MediaItem mi = (MediaItem) item;
+                    selectedWallItem = mi;
                     if (photoPaging != null && ("photo".equals(mi.getType()) || "video".equals(mi.getType()))) {
                         Integer index = photoPositions.get(mi.getId());
                         if (index != null && index >= currentMediaList.size() - PREFETCH_DISTANCE
@@ -670,9 +745,10 @@ public class MainFragment extends BrowseSupportFragment {
             String yearMonth = item.year + "年" + item.month + "月";
             String dateStr = item.year + "-" + String.format("%02d", item.month) + "-" + String.format("%02d", item.day);
             
-            if (!yearMonth.equals(currentYearMonth)) {
+            boolean newMonth = !yearMonth.equals(currentYearMonth);
+            if (newMonth || currentRowAdapter == null || currentRowAdapter.size() >= wallLayout.columns) {
                 currentYearMonth = yearMonth;
-                HeaderItem header = new HeaderItem(yearMonth);
+                HeaderItem header = newMonth ? new HeaderItem(yearMonth) : null;
                 currentRowAdapter = new ArrayObjectAdapter(mCardPresenter);
                 mRowsAdapter.add(new ListRow(header, currentRowAdapter));
             }
@@ -747,7 +823,7 @@ public class MainFragment extends BrowseSupportFragment {
         timelineItems = null;
         mRowsAdapter.clear();
 
-        int itemsPerRow = 6;
+        int itemsPerRow = wallLayout.columns;
         int totalRows = (int) Math.ceil((double) folders.size() / itemsPerRow);
 
         for (int row = 0; row < totalRows; row++) {
@@ -816,7 +892,7 @@ public class MainFragment extends BrowseSupportFragment {
         updatePageFooter(albumPaging, savedAlbumList.size());
         if (savedAlbumSelection >= 0 && savedAlbumSelection < albums.size()) {
             final int position = savedAlbumSelection;
-            positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
+            positionHandler.post(() -> restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns));
         }
     }
 
@@ -906,7 +982,7 @@ public class MainFragment extends BrowseSupportFragment {
         updatePageFooter(sharedAlbumPaging, savedSharedAlbumList.size());
         if (savedAlbumSelection >= 0 && savedAlbumSelection < savedSharedAlbumList.size()) {
             final int position = savedAlbumSelection;
-            positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
+            positionHandler.post(() -> restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns));
         }
     }
 
@@ -1376,7 +1452,7 @@ public class MainFragment extends BrowseSupportFragment {
         savedPlacesList = new ArrayList<>(places);
         mRowsAdapter.clear();
 
-        int itemsPerRow = 6;
+        int itemsPerRow = wallLayout.columns;
         int totalRows = (int) Math.ceil((double) places.size() / itemsPerRow);
 
         for (int row = 0; row < totalRows; row++) {
@@ -1687,7 +1763,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void appendPagedCard(MediaItem item, int position) {
-        if (position % 6 == 0) {
+        if (pagedLastRow == null || pagedLastRow.size() >= wallLayout.columns) {
             pagedLastRow = new ArrayObjectAdapter(mCardPresenter);
             ListRow row = new ListRow(position == 0 ? new HeaderItem(pagedTitle) : null, pagedLastRow);
             int footerIndex = pageFooter == null ? -1 : mRowsAdapter.indexOf(pageFooter);
@@ -1867,7 +1943,7 @@ public class MainFragment extends BrowseSupportFragment {
 
         currentMediaList = new ArrayList<>();
 
-        int itemsPerRow = 6;
+        int itemsPerRow = wallLayout.columns;
         int totalRows = (int) Math.ceil((double) photos.size() / itemsPerRow);
 
         for (int row = 0; row < totalRows; row++) {
@@ -1949,7 +2025,7 @@ public class MainFragment extends BrowseSupportFragment {
         savedPersonList = new ArrayList<>(persons);
         mRowsAdapter.clear();
 
-        int itemsPerRow = 6;
+        int itemsPerRow = wallLayout.columns;
         int totalRows = (int) Math.ceil((double) persons.size() / itemsPerRow);
 
         for (int row = 0; row < totalRows; row++) {
@@ -2039,10 +2115,11 @@ public class MainFragment extends BrowseSupportFragment {
             String title = item.month + "月" + item.day + "日";
             String suffix = " (" + item.itemCount + "张)";
 
-            if (!yearMonth.equals(currentYearMonth)) {
+            boolean newMonth = !yearMonth.equals(currentYearMonth);
+            if (newMonth || currentRowAdapter == null || currentRowAdapter.size() >= wallLayout.columns) {
                 currentYearMonth = yearMonth;
                 String headerTitle = currentPersonName != null ? currentPersonName + " - " + yearMonth : yearMonth;
-                HeaderItem header = new HeaderItem(headerTitle);
+                HeaderItem header = newMonth ? new HeaderItem(headerTitle) : null;
                 currentRowAdapter = new ArrayObjectAdapter(mCardPresenter);
                 mRowsAdapter.add(new ListRow(header, currentRowAdapter));
             }
@@ -2151,7 +2228,7 @@ public class MainFragment extends BrowseSupportFragment {
         if (requestCode != SHARED_DETAIL_REQUEST || resultCode != android.app.Activity.RESULT_OK
                 || data == null || !"shared_album".equals(photoMode) || photoPaging == null) return;
         Integer position = photoPositions.get(data.getStringExtra("LAST_MEDIA_ID"));
-        if (position != null) positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
+        if (position != null) positionHandler.post(() -> restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns));
     }
 
     private void openFolderBrowse(MediaItem folderItem) {

@@ -47,6 +47,11 @@ public class CardPresenter extends Presenter {
     private static int lastFolderColorIndex = -1;
 
     private String baseUrl;
+    private PhotoWallLayout wallLayout;
+
+    void setWallLayout(PhotoWallLayout layout) {
+        wallLayout = layout;
+    }
 
     private static final class CardViewHolder extends Presenter.ViewHolder {
         final ImageRequestScope images = new ImageRequestScope();
@@ -132,6 +137,9 @@ public class CardPresenter extends Presenter {
     public void onBindViewHolder(ViewHolder viewHolder, Object item) {
         MediaItem mediaItem = (MediaItem) item;
         ImageCardView cardView = (ImageCardView) viewHolder.view;
+        int cardWidth = wallLayout == null ? CARD_WIDTH : wallLayout.cardWidthPx;
+        int cardHeight = wallLayout == null ? CARD_HEIGHT : wallLayout.mediaHeightPx;
+        int dateHeight = wallLayout == null ? DATE_CARD_HEIGHT : wallLayout.dateHeightPx;
         ImageRequestScope images = ((CardViewHolder) viewHolder).images;
         images.clear();
         CachedImageLoader.clear(cardView.getMainImageView());
@@ -146,11 +154,11 @@ public class CardPresenter extends Presenter {
         cardView.setTag(R.id.media_item_type, mediaItem.getType());
 
         if ("geo_retry".equals(mediaItem.getType())) {
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             cardView.setMainImage(createPlaceholderDrawable(cardView.getContext()));
             cardView.setContentText(mediaItem.getDateStr());
         } else if ("date".equals(mediaItem.getType()) || "person_date".equals(mediaItem.getType())) {
-            cardView.setMainImageDimensions(DATE_CARD_WIDTH, DATE_CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, dateHeight);
             
             List<String> previewUrls = mediaItem.getPreviewThumbUrls();
             if (previewUrls != null && !previewUrls.isEmpty()) {
@@ -160,24 +168,24 @@ public class CardPresenter extends Presenter {
             }
         } else if ("video".equals(mediaItem.getType())) {
             // 视频类型：显示缩略图并添加播放图标
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             loadVideoThumbnail(cardView, mediaItem, images);
         } else if ("folder".equals(mediaItem.getType())) {
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             cardView.setMainImage(getFolderCardDrawable(cardView.getContext()));
             cardView.setContentText(mediaItem.getDateStr() != null ? mediaItem.getDateStr() : "");
         } else if ("album".equals(mediaItem.getType()) || "shared_album".equals(mediaItem.getType())
                 || "place".equals(mediaItem.getType())) {
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             loadSingleImage(cardView, mediaItem);
             cardView.setContentText(mediaItem.getDateStr() != null ? mediaItem.getDateStr() : "");
         } else if ("person".equals(mediaItem.getType())) {
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             loadSingleImage(cardView, mediaItem);
             cardView.setContentText(mediaItem.getPhotoCount() + "张照片");
         } else {
             // 照片类型
-            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImageDimensions(cardWidth, cardHeight);
             loadSingleImage(cardView, mediaItem);
         }
     }
