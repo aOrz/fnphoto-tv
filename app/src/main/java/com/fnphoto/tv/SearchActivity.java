@@ -218,6 +218,12 @@ public class SearchActivity extends FragmentActivity {
         editSearch.setOnKeyListener(new View.OnKeyListener() {
             @Override
             public boolean onKey(View v, int keyCode, KeyEvent event) {
+                // EditText consumes DPAD_DOWN for cursor movement before Activity.onKeyDown.
+                // Route the user's explicit focus move here, without focusing on async updates.
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+                        && event.getAction() == KeyEvent.ACTION_DOWN) {
+                    return focusSearchContent();
+                }
                 boolean isOk = keyCode == KeyEvent.KEYCODE_DPAD_CENTER
                         || keyCode == KeyEvent.KEYCODE_ENTER;
                 if (isOk && event.getAction() == KeyEvent.ACTION_UP) {
@@ -435,16 +441,17 @@ public class SearchActivity extends FragmentActivity {
         return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
     }
 
+    private boolean focusSearchContent() {
+        if (screenState.focusAction()) return true;
+        if (tvStatus.isShown() && tvStatus.isFocusable() && tvStatus.requestFocus()) return true;
+        return rvResults.isShown() && rvResults.requestFocus();
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             finish();
             return true;
-        }
-        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && editSearch.isFocused()) {
-            if (screenState.focusAction()) return true;
-            if (tvStatus.isFocusable() && tvStatus.requestFocus()) return true;
-            if (rvResults.requestFocus()) return true;
         }
         return super.onKeyDown(keyCode, event);
     }

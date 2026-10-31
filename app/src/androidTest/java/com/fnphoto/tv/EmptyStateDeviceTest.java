@@ -15,7 +15,10 @@ import android.widget.TextView;
 
 import androidx.core.view.GravityCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.recyclerview.widget.RecyclerView;
 import androidx.test.platform.app.InstrumentationRegistry;
+
+import com.fnphoto.tv.api.HttpClientProvider;
 
 import org.junit.After;
 import org.junit.Before;
@@ -212,11 +215,19 @@ public class EmptyStateDeviceTest {
         final SearchActivity search = startSearch();
         await(() -> title(search).equals("搜索照片和视频"));
         final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(input::hasFocus);
         ui(() -> { input.requestFocus(); input.setText("no-match"); return null; });
         await(() -> title(search).equals("未找到搜索结果"));
         assertTrue("Empty result must not steal the editor focus", ui(input::hasFocus));
         assertStateReadable(search);
         screenshot("search-no-results");
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(input::hasFocus);
         fixture.respond(SEARCH, 503, "{\"code\":503}");
         ui(() -> { input.setText("retry-query"); return null; });
         await(() -> title(search).equals("搜索失败"));
@@ -225,6 +236,11 @@ public class EmptyStateDeviceTest {
         await(() -> action(search).hasFocus());
         screenshot("search-error-retry");
         int before = fixture.count(SEARCH);
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(input::hasFocus);
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
+        assertEquals("Moving focus does not retry", before, fixture.count(SEARCH));
         fixture.clear(SEARCH);
         key(KeyEvent.KEYCODE_DPAD_CENTER);
         await(() -> title(search).equals("未找到搜索结果"));
@@ -237,18 +253,103 @@ public class EmptyStateDeviceTest {
 
     @Test public void oldSearchResponseCannotReplaceClearedQueryPrompt() throws Exception {
         final SearchActivity search = startSearch();
+        fixture.respond(SEARCH, 503, "{\"code\":503}");
         fixture.hold(SEARCH);
         final EditText input = ui(() -> (EditText) field(search, "editSearch"));
         ui(() -> { input.setText("slow-query"); return null; });
         assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
         await(() -> title(search).equals("正在搜索"));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        assertTrue("Loading has no action or visible grid to take focus", ui(input::hasFocus));
+        assertFalse("Hidden action must not gain focus", ui(() -> action(search).hasFocus()));
         screenshot("search-loading");
         ui(() -> { input.setText(""); return null; });
         await(() -> title(search).equals("搜索照片和视频"));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> action(search).hasFocus());
         fixture.release();
         assertTrue(fixture.finished.await(10, TimeUnit.SECONDS));
+        // The server finishing alone does not mean Retrofit has posted its callback yet.
+        // Drain client workers before the main-thread barrier used by the final assertions.
+        await(() -> HttpClientProvider.getClient(search).dispatcher().runningCallsCount() == 0
+                && HttpClientProvider.getClient(search).dispatcher().queuedCallsCount() == 0);
         instrumentation.waitForIdleSync();
-        assertEquals("Canceled old request must not repaint no-results", "搜索照片和视频", ui(() -> title(search)));
+        assertEquals("Canceled old failure must not replace the input prompt", "搜索照片和视频", ui(() -> title(search)));
+        assertTrue("Canceled response must not steal the selected action", ui(() -> action(search).hasFocus()));
+    }
+
+    @Test public void searchAuthenticationAndPermissionRetriesAreRemoteReachable() throws Exception {
+        final SearchActivity search = startSearch();
+        final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        for (int status : new int[] {401, 403}) {
+            fixture.respond(SEARCH, status, "{\"code\":" + status + "}");
+            String query = "synthetic-status-" + status;
+            ui(() -> { input.requestFocus(); input.setText(query); return null; });
+            await(() -> title(search).equals(status == 401 ? "登录已失效" : "没有访问权限"));
+            assertTrue("Async failure must preserve editor focus", ui(input::hasFocus));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            await(() -> action(search).hasFocus());
+            screenshot("search-" + status + "-retry");
+            int before = fixture.count(SEARCH);
+            fixture.clear(SEARCH);
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            await(() -> title(search).equals("未找到搜索结果"));
+            assertEquals("One confirm, one retry", before + 1, fixture.count(SEARCH));
+            assertEquals(query, android.net.Uri.parse(fixture.lastTarget.get(SEARCH)).getQueryParameter("keyword"));
+            assertEquals("0", android.net.Uri.parse(fixture.lastTarget.get(SEARCH)).getQueryParameter("offset"));
+        }
+        key(KeyEvent.KEYCODE_BACK);
+        await(search::isFinishing);
+    }
+
+    @Test public void searchDownEntersVisibleResultsInsteadOfHiddenStateAction() throws Exception {
+        final SearchActivity search = startSearch();
+        final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        final RecyclerView results = ui(() -> (RecyclerView) field(search, "rvResults"));
+        fixture.respond(SEARCH, 200, "{\"code\":0,\"data\":{\"list\":["
+                + "{\"id\":17,\"fileName\":\"synthetic-focus.jpg\",\"category\":\"photo\"}],\"hasNext\":false}}");
+        ui(() -> { input.setText("synthetic-focus"); return null; });
+        await(() -> results.isShown() && results.getChildCount() > 0);
+        assertTrue("New results must not steal editor focus", ui(input::hasFocus));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> results.hasFocus() && results.getFocusedChild() != null);
+        assertFalse("Hidden state action cannot retain focus", ui(() -> action(search).hasFocus()));
+        screenshot("search-result-remote-focus");
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(input::hasFocus);
+        key(KeyEvent.KEYCODE_BACK);
+        await(search::isFinishing);
+    }
+
+    @Test public void searchAppendFailureFocusesVisibleRetryAndPreservesOffset() throws Exception {
+        final SearchActivity search = startSearch();
+        final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        final TextView status = ui(() -> (TextView) field(search, "tvStatus"));
+        final RecyclerView results = ui(() -> (RecyclerView) field(search, "rvResults"));
+        String nextPage = SEARCH + "?keyword=append-focus&limit=100&offset=1";
+        fixture.respond(SEARCH, 200, "{\"code\":0,\"data\":{\"list\":["
+                + "{\"id\":17,\"fileName\":\"synthetic-focus.jpg\",\"category\":\"photo\"}],\"hasNext\":true}}");
+        fixture.respond(nextPage, 503, "{\"code\":503}");
+        ui(() -> { input.setText("append-focus"); return null; });
+        await(() -> results.getChildCount() > 0 && status.isShown()
+                && status.getText().toString().startsWith("搜索失败"));
+        assertTrue("Append failure must not steal editor focus", ui(input::hasFocus));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(status::hasFocus);
+        assertFalse("No hidden full-screen retry target", ui(() -> action(search).hasFocus()));
+        screenshot("search-append-error-retry");
+        int before = fixture.count(SEARCH);
+        fixture.respond(nextPage, 200, Fixture.EMPTY);
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> !status.isFocusable() && status.getText().toString().equals("已加载 1 个结果"));
+        assertEquals(before + 1, fixture.count(SEARCH));
+        assertEquals("append-focus", android.net.Uri.parse(fixture.lastTarget.get(SEARCH)).getQueryParameter("keyword"));
+        assertEquals("1", android.net.Uri.parse(fixture.lastTarget.get(SEARCH)).getQueryParameter("offset"));
+        assertEquals(1, (int) ui(() -> results.getAdapter().getItemCount()));
+        ui(() -> { input.requestFocus(); return null; });
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        await(() -> results.hasFocus() && results.getFocusedChild() != null);
+        screenshot("search-append-retry-content");
     }
 
     @Test public void folderPermissionFailureRetriesOriginalOffsetThenShowsEmpty() throws Exception {
@@ -275,9 +376,10 @@ public class EmptyStateDeviceTest {
         await(folder::isFinishing);
     }
 
-    private SearchActivity startSearch() {
+    private SearchActivity startSearch() throws Exception {
         extraActivity = instrumentation.startActivitySync(new Intent(instrumentation.getTargetContext(), SearchActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        await(extraActivity::hasWindowFocus);
         return (SearchActivity) extraActivity;
     }
 
@@ -422,7 +524,8 @@ public class EmptyStateDeviceTest {
                     counter = prior == null ? created : prior;
                 }
                 counter.incrementAndGet();
-                Reply reply = replies.get(path);
+                Reply reply = replies.get(target);
+                if (reply == null) reply = replies.get(path);
                 if (reply == null) reply = new Reply(200, EMPTY);
                 held = path.equals(heldPath);
                 if (held) { arrived.countDown(); gate.await(15, TimeUnit.SECONDS); }
