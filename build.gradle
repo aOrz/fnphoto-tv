@@ -1,13 +1,5 @@
 buildscript {
     repositories {
-        maven { 
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven { 
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
         google()
         mavenCentral()
     }
@@ -18,14 +10,6 @@ buildscript {
 
 allprojects {
     repositories {
-        maven { 
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven { 
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
         google()
         mavenCentral()
     }
