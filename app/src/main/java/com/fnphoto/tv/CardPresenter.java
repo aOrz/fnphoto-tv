@@ -488,7 +488,8 @@ public class CardPresenter extends Presenter {
 
         if (imageUrl != null && !imageUrl.isEmpty()) {
             // 使用带缓存的加载
-            CachedImageLoader.loadIntoImageView(cardView.getMainImageView(), imageUrl, token);
+            CachedImageLoader.loadIntoImageView(cardView.getMainImageView(), imageUrl, token,
+                    CARD_WIDTH, CARD_HEIGHT);
         } else {
             Drawable drawable = ContextCompat.getDrawable(cardView.getContext(),
                     android.R.drawable.ic_menu_gallery);

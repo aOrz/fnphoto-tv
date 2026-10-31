@@ -88,6 +88,14 @@ public final class CachedImageLoader {
                 .error(android.R.drawable.ic_menu_gallery).into(view);
     }
 
+    /** A fixed thumbnail budget for walls whose display size can grow with TV resolution. */
+    public static void loadIntoImageView(ImageView view, String url, String token, int width, int height) {
+        Glide.with(view.getContext()).load(url == null || url.isEmpty() ? null : model(view.getContext(), url, token))
+                .override(ImageDimensions.safeWidth(width), ImageDimensions.safeHeight(height))
+                .centerCrop().placeholder(android.R.drawable.ic_menu_gallery)
+                .error(android.R.drawable.ic_menu_gallery).into(view);
+    }
+
     /** The thumbnail belongs to the same request: it cannot overwrite a completed full image. */
     public static void loadPhotoIntoImageView(ImageView view, String url, String thumbnailUrl,
             String token, @Nullable LoadListener listener) {
