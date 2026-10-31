@@ -13,6 +13,7 @@
     <color name="immich_primary_dim">#4453D6</color>
     <color name="immich_violet">#9B6BFF</color>
     <color name="immich_primary_ghost">#335A6BFF</color>
+    <color name="focus_ring">#C4CCFF</color>
 
     <color name="text_primary">#EDEFF4</color>
     <color name="text_secondary">#98A0B0</color>

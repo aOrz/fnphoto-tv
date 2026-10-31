@@ -11,6 +11,7 @@ import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -155,11 +156,14 @@ public class SearchActivity extends FragmentActivity {
         tvStatus.setText("输入关键词开始搜索");
         tvStatus.setTextColor(Color.parseColor("#A8AFBF"));
         tvStatus.setTextSize(13);
+        tvStatus.setBackgroundResource(R.drawable.bg_menu_item);
         tvStatus.setPadding(dp(72), dp(14), dp(64), dp(6));
         tvStatus.setOnClickListener(v -> {
             if (pages.isWindowFull()) startNextWindow();
             else loadSearchPage(true);
         });
+        tvStatus.setFocusable(false);
+        tvStatus.setClickable(false);
         rootLayout.addView(tvStatus);
 
         // 结果网格
@@ -371,8 +375,8 @@ public class SearchActivity extends FragmentActivity {
             return true;
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && editSearch.isFocused()) {
-            rvResults.requestFocus();
-            return true;
+            if (tvStatus.isFocusable() && tvStatus.requestFocus()) return true;
+            if (rvResults.requestFocus()) return true;
         }
         return super.onKeyDown(keyCode, event);
     }
@@ -384,29 +388,9 @@ public class SearchActivity extends FragmentActivity {
 
         @Override
         public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
-            ImageView imageView = new androidx.appcompat.widget.AppCompatImageView(SearchActivity.this) {
-                @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-                    // GridLayoutManager may remeasure a row to its tallest cell (rounding by 1px).
-                    if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.EXACTLY) {
-                        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
-                        return;
-                    }
-                    int width = View.MeasureSpec.getSize(widthMeasureSpec);
-                    int imageWidth = Math.max(1, width - getPaddingLeft() - getPaddingRight());
-                    int height = Math.max(1, Math.round(imageWidth * 3f / 4f))
-                            + getPaddingTop() + getPaddingBottom();
-                    super.onMeasure(widthMeasureSpec,
-                            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
-                }
-            };
-            imageView.setLayoutParams(new RecyclerView.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            imageView.setPadding(dp(4), dp(4), dp(4), dp(4));
-            imageView.setBackgroundColor(Color.parseColor("#333333"));
-            imageView.setFocusable(true);
-            imageView.setFocusableInTouchMode(true);
-            return new ViewHolder(imageView);
+            View itemView = LayoutInflater.from(parent.getContext())
+                    .inflate(R.layout.item_photo_grid, parent, false);
+            return new ViewHolder(itemView);
         }
 
         @Override
@@ -428,14 +412,12 @@ public class SearchActivity extends FragmentActivity {
 
         class ViewHolder extends RecyclerView.ViewHolder {
             ImageView ivPhoto;
+            View videoIndicator;
 
-            ViewHolder(ImageView itemView) {
+            ViewHolder(View itemView) {
                 super(itemView);
-                ivPhoto = itemView;
-
-                itemView.setOnFocusChangeListener((v, hasFocus) -> {
-                    v.setAlpha(hasFocus ? 1.0f : 0.7f);
-                });
+                ivPhoto = itemView.findViewById(R.id.iv_photo);
+                videoIndicator = itemView.findViewById(R.id.v_video_indicator);
 
                 itemView.setOnClickListener(v -> {
                     int pos = getAdapterPosition();
@@ -447,7 +429,7 @@ public class SearchActivity extends FragmentActivity {
 
             void bind(FnHttpApi.GalleryPhoto photo, int position) {
                 CachedImageLoader.loadIntoImageView(ivPhoto, mediaItems.get(position).getThumbnailUrl(), token);
-                ivPhoto.setBackgroundColor(Color.parseColor("video".equals(photo.category) ? "#44000000" : "#333333"));
+                videoIndicator.setVisibility("video".equals(photo.category) ? View.VISIBLE : View.GONE);
             }
         }
     }
