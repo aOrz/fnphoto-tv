@@ -1,13 +1,5 @@
 buildscript {
     repositories {
-        maven { 
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven { 
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
         google()
         mavenCentral()
     }
@@ -18,15 +10,23 @@ buildscript {
 
 allprojects {
     repositories {
-        maven { 
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven { 
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
         google()
         mavenCentral()
+
+        // ExoPlayer 2.11.8 was published to the retired JCenter repository.
+        // Keep the existing Android-compatible version, but confine the HTTPS
+        // archive mirror to this dependency group instead of using an HTTP mirror
+        // for all plugins and libraries.
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = 'legacyExoPlayer'
+                    url = uri('https://maven.aliyun.com/repository/public')
+                }
+            }
+            filter {
+                includeGroup 'com.google.android.exoplayer'
+            }
+        }
     }
 }
