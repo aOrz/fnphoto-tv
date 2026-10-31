@@ -116,3 +116,7 @@ MIT License — See LICENSE file for details
 ## Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+
+## Testing and synthetic data
+
+Reproducible mock fixtures, generated H264/AAC videos, and remote-control regression cases live in [test/README.md](test/README.md). See the [device QA checklist](test/QA_CHECKLIST.md) and [CI instructions](.github/CI.md). No real NAS account or private media is needed. Generated media, keys, screenshots and logs are not committed.

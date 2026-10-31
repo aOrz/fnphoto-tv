@@ -36,7 +36,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(mes
 log = logging.getLogger('fnos-mock')
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_VIDEO_PATH = os.path.join(SCRIPT_DIR, "test_video.mp4")
+GENERATED_DIR = os.path.join(SCRIPT_DIR, ".generated")
+TEST_VIDEO_PATH = os.path.join(GENERATED_DIR, "media", "clip_a.mp4")
 
 RSA_KEY = rsa.generate_private_key(
     public_exponent=65537, key_size=2048, backend=default_backend()
@@ -656,43 +657,16 @@ async def handle_stream_original(request):
 
 
 def generate_test_video():
+    """Legacy preflight: media generation is now an explicit, separate command."""
     if os.path.exists(TEST_VIDEO_PATH):
         return
-    import imageio
-    import numpy as np
-
-    w, h, duration, fps = 640, 480, 3, 15
-    frames = []
-    for i in range(duration * fps):
-        t = i / fps
-        r = int(128 + 127 * np.sin(2 * np.pi * 0.5 * t))
-        g = int(128 + 127 * np.sin(2 * np.pi * 0.3 * t + 2))
-        b = int(128 + 127 * np.sin(2 * np.pi * 0.2 * t + 4))
-        frame = np.zeros((h, w, 3), dtype=np.uint8)
-        frame[:, :, 0] = r
-        frame[:, :, 1] = g
-        frame[:, :, 2] = b
-        draw = ImageDraw.Draw(Image.fromarray(frame))
-        text = f"Test Video {i // fps + 1}s"
-        try:
-            font = ImageFont.truetype("arial.ttf", 36)
-        except Exception:
-            font = ImageFont.load_default()
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text(((w - tw) // 2, (h - th) // 2), text, fill=(255, 255, 255), font=font)
-        frames.append(np.array(Image.fromarray(frame)))
-    imageio.mimsave(TEST_VIDEO_PATH, frames, fps=fps, codec="libx264",
-                     pixelformat="yuv420p", ffmpeg_params=["-profile:v", "baseline", "-level", "3.0"])
-    log.info(f"Generated test video: {TEST_VIDEO_PATH}")
+    raise RuntimeError("Generate synthetic media first: python test/generate_qa_media.py")
 
 
 async def handle_stream_video(request):
-    photo_id = request.match_info.get("id", "0")
-    with open(TEST_VIDEO_PATH, "rb") as f:
-        data = f.read()
-    return web.Response(body=data, content_type="video/mp4",
-                        headers={"Cache-Control": "max-age=3600"})
+    if not os.path.exists(TEST_VIDEO_PATH):
+        raise web.HTTPServiceUnavailable(text="Synthetic MP4 not generated; see test/README.md")
+    return web.FileResponse(TEST_VIDEO_PATH, headers={"Cache-Control": "no-store"})
 
 
 async def handle_stream_thumbnail(request):
@@ -743,7 +717,7 @@ async def handle_login_ws(request):
                     aes_key = rsa_decrypt(data["rsa"]).decode('utf-8')
                     login_str = aes_decrypt(data["aes"], aes_key, data["iv"])
                     login = json.loads(login_str)
-                    log.info(f"Login: user={login.get('user')}, device={login.get('deviceName')}")
+                    log.info("Synthetic login received (account/device values omitted)")
                     token = "test_token_" + login.get("user", "u")
                     secret = "test_secret_12345678"
                     TOKEN_CACHE[token] = {"user": login.get("user"), "secret": secret, "backId": "0000000000000001"}
@@ -752,7 +726,7 @@ async def handle_login_ws(request):
                         "backId": "0000000000000001", "user": login.get("user", ""),
                         "deviceName": login.get("deviceName", ""), "deviceType": login.get("deviceType", ""),
                     })
-                    log.info(f"Login OK for {login.get('user')}")
+                    log.info("Synthetic login accepted")
                 else:
                     log.warning(f"Unknown WS req: {req}")
             except Exception as e:
@@ -771,7 +745,7 @@ async def handle_authenticated_ws(request):
     await ws.prepare(request)
     token = request.query.get("token", "")
     qs_path = request.match_info.get("channel", "main")
-    log.info(f"WS {qs_path} connection token={token[:20]}...")
+    log.info("Synthetic authenticated WebSocket connected (token omitted)")
     HEARTBEAT_CLIENTS.add(ws)
     try:
         async for msg in ws:
@@ -828,6 +802,7 @@ def make_self_signed_cert(cert_file, key_file, ip_str):
     with open(cert_file, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
     with open(key_file, "wb") as f:
+        os.chmod(key_file, 0o600)
         f.write(key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.TraditionalOpenSSL,
@@ -836,7 +811,7 @@ def make_self_signed_cert(cert_file, key_file, ip_str):
     log.info("Self-signed cert generated")
 
 
-def build_app():
+def build_app(video_handler=None):
     app = web.Application(middlewares=[auth_middleware])
 
     # ── REST API routes ──
@@ -876,7 +851,7 @@ def build_app():
     # Stream / Media
     app.router.add_get("/p/api/v1/stream/p/t/{id}/o/{uuid}", handle_stream_original)
     app.router.add_get("/p/api/v1/stream/p/t/{id}/s/{uuid}", handle_stream_thumbnail)
-    app.router.add_get("/p/api/v1/stream/v/{id}", handle_stream_video)
+    app.router.add_get("/p/api/v1/stream/v/{id}", video_handler or handle_stream_video)
     app.router.add_get("/p/api/v1/stream/face/{faceId}", handle_face_image)
     # Cloud connect
     app.router.add_post("/api/v1/fn/con", handle_cloud_connect)
@@ -889,19 +864,19 @@ def build_app():
 
 
 async def main():
-    local_ip = get_local_ip()
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    cert = os.path.join(script_dir, "test_cert.pem")
-    key = os.path.join(script_dir, "test_key.pem")
-    make_self_signed_cert(cert, key, local_ip)
+    local_ip = "127.0.0.1"
+    os.makedirs(GENERATED_DIR, exist_ok=True)
+    cert = os.path.join(GENERATED_DIR, "test_cert.pem")
+    key = os.path.join(GENERATED_DIR, "test_key.pem")
     generate_test_video()
+    make_self_signed_cert(cert, key, local_ip)
 
     app = build_app()
 
     # Plain HTTP/WS server on 5666
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 5666)
+    site = web.TCPSite(runner, "127.0.0.1", 5666)
     await site.start()
     log.info(f"WS/HTTP : ws://{local_ip}:5666/websocket  http://{local_ip}:5666/p/api/v1/...")
 
@@ -910,7 +885,7 @@ async def main():
     ssl_ctx.load_cert_chain(cert, key)
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
-    site_tls = web.TCPSite(runner, "0.0.0.0", 9001, ssl_context=ssl_ctx)
+    site_tls = web.TCPSite(runner, "127.0.0.1", 9001, ssl_context=ssl_ctx)
     await site_tls.start()
     log.info(f"WSS/HTTPS: wss://{local_ip}:9001/websocket  https://{local_ip}:9001/p/api/v1/...")
 

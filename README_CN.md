@@ -116,3 +116,7 @@ MIT 协议 — 详见 LICENSE 文件
 ## 贡献指南
 
 欢迎提交 Pull Request。重大变更请先提交 issue 讨论。
+
+## 测试与合成数据
+
+可复现 mock、按需生成的 H264/AAC 视频及遥控回归步骤见 [test/README.md](test/README.md)，设备用例见 [验收清单](test/QA_CHECKLIST.md)，构建检查见 [CI 说明](.github/CI.md)。无需真实 NAS 账号或私人媒体；生成的视频、密钥、截图和日志不提交仓库。
