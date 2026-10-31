@@ -1,6 +1,7 @@
 package com.fnphoto.tv.player;
 
 import com.google.android.exoplayer2.ExoPlaybackException;
+import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.ParserException;
 import com.google.android.exoplayer2.audio.AudioSink;
 import com.google.android.exoplayer2.upstream.HttpDataSource;
@@ -61,7 +62,8 @@ public class VideoPlaybackFailureTest {
         assertTrue(VideoPlaybackFailure.classify(new ParserException("bad format")).shouldFallback());
         assertTrue(VideoPlaybackFailure.classify(new Exception("decoder"),
                 ExoPlaybackException.TYPE_RENDERER).shouldFallback());
-        assertTrue(VideoPlaybackFailure.classify(new AudioSink.InitializationException(0, 48000, 2, 4096)).shouldFallback());
+        assertTrue(VideoPlaybackFailure.classify(new AudioSink.InitializationException(
+                0, 48000, 2, 4096, new Format.Builder().build(), false, null)).shouldFallback());
     }
 
     @Test public void genericIoUnknownRuntimeAndMemoryErrorsAreNotCompatibility() {

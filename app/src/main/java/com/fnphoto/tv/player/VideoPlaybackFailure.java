@@ -15,7 +15,7 @@ import java.util.IdentityHashMap;
 import java.util.Set;
 import javax.net.ssl.SSLException;
 
-/** ExoPlayer 2.11.8 failure policy. Switching decoders cannot repair a failed HTTP request. */
+/** ExoPlayer failure policy. Switching decoders cannot repair a failed HTTP request. */
 public final class VideoPlaybackFailure {
     private final boolean fallback;
     private final String userMessage;
@@ -37,7 +37,7 @@ public final class VideoPlaybackFailure {
     /** Explicit type also lets JVM tests exercise renderer policy without Android's SystemClock. */
     public static VideoPlaybackFailure classify(Throwable failure, int exoType) {
         boolean renderer = exoType == ExoPlaybackException.TYPE_RENDERER;
-        boolean outOfMemory = exoType == ExoPlaybackException.TYPE_OUT_OF_MEMORY;
+        boolean outOfMemory = false;
         boolean parser = false;
         boolean initialization = false;
         boolean timeout = false;
@@ -51,7 +51,6 @@ public final class VideoPlaybackFailure {
             if (cause instanceof ExoPlaybackException) {
                 int type = ((ExoPlaybackException) cause).type;
                 renderer |= type == ExoPlaybackException.TYPE_RENDERER;
-                outOfMemory |= type == ExoPlaybackException.TYPE_OUT_OF_MEMORY;
             }
             if (cause instanceof HttpDataSource.InvalidResponseCodeException && httpCode == null)
                 httpCode = ((HttpDataSource.InvalidResponseCodeException) cause).responseCode;

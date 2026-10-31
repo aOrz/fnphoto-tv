@@ -7,7 +7,6 @@ import com.fnphoto.tv.api.FnAuthUtils;
 import com.google.android.exoplayer2.upstream.DataSource;
 import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource;
-import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
 import com.google.android.exoplayer2.upstream.HttpDataSource;
 import com.google.android.exoplayer2.upstream.TransferListener;
 
@@ -16,7 +15,7 @@ import java.util.Map;
 
 /**
  * 自定义 HttpDataSource 工厂，用于添加飞牛相册的认证头
- * 适配 ExoPlayer API 2.11.8 (支持 API 19)
+ * 适配 ExoPlayer API 2.13.3 (支持 API 19)
  */
 public class AuthenticatedHttpDataSourceFactory implements DataSource.Factory {
 
@@ -30,34 +29,10 @@ public class AuthenticatedHttpDataSourceFactory implements DataSource.Factory {
 
     @Override
     public DataSource createDataSource() {
-        // 创建 HttpDataSource 工厂 - 必须实现所有 5 个方法
-        HttpDataSource.Factory httpFactory = new HttpDataSource.Factory() {
-            @Override
-            public HttpDataSource createDataSource() {
-                DefaultHttpDataSource dataSource = new DefaultHttpDataSource(userAgent);
-                return new AuthenticatedHttpDataSource(context, dataSource);
-            }
-            
-            @Override
-            public HttpDataSource.RequestProperties getDefaultRequestProperties() {
-                return null;
-            }
-            
-            @Override
-            public void setDefaultRequestProperty(String name, String value) {
-                // Deprecated in 2.11.8, no-op
-            }
-            
-            @Override
-            public void clearDefaultRequestProperty(String name) {
-                // Deprecated in 2.11.8, no-op
-            }
-            
-            @Override
-            public void clearAllDefaultRequestProperties() {
-                // Deprecated in 2.11.8, no-op
-            }
-        };
+        DefaultHttpDataSource.Factory delegateFactory =
+                new DefaultHttpDataSource.Factory().setUserAgent(userAgent);
+        DataSource.Factory httpFactory = () ->
+                new AuthenticatedHttpDataSource(context, delegateFactory.createDataSource());
 
         // 使用 DefaultDataSourceFactory 包装
         return new DefaultDataSourceFactory(context, httpFactory).createDataSource();

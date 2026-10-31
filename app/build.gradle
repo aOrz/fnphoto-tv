@@ -71,8 +71,8 @@ dependencies {
     annotationProcessor 'com.github.bumptech.glide:compiler:4.12.0'
     implementation 'com.github.bumptech.glide:okhttp3-integration:4.12.0'
     
-    // ExoPlayer 2.11.8 是完整支持 API 19 的最后一个稳定版本
-    implementation 'com.google.android.exoplayer:exoplayer:2.11.8'
+    // 2.13.3 is the first Google Maven release; its minSdk 16 still supports API 19.
+    implementation 'com.google.android.exoplayer:exoplayer:2.13.3'
     
     // Retrofit - 降级到 2.6.4 以兼容 OkHttp 3.12.x
     implementation('com.squareup.retrofit2:retrofit:2.6.4') {
