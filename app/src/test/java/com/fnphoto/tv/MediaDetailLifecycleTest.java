@@ -51,9 +51,11 @@ public class MediaDetailLifecycleTest {
     private static class Result implements MediaPageController.Callback {
         int ready;
         int failures;
+        int pauses;
         boolean available;
         @Override public void onReady(boolean nextAvailable) { ready++; available = nextAvailable; }
         @Override public void onFailure() { failures++; }
+        @Override public void onPaused(String message) { pauses++; }
     }
 
     @Test public void navigationInvalidatesOldImageAndVideoCallbacks() {
@@ -172,5 +174,60 @@ public class MediaDetailLifecycleTest {
         controller.ensureNext(0, result);
         assertEquals(1, result.ready);
         assertFalse(result.available);
+    }
+
+    @Test public void sparseScanPauseReleasesWaitAndAllowsOnlyExplicitNextRequest() {
+        Source source = new Source();
+        MediaPageController controller = new MediaPageController(Collections.singletonList(photo("1")), source);
+        Result result = new Result();
+        controller.ensureNext(0, result);
+        source.pending.onPaused("已扫描175条，继续扫描");
+        assertEquals(1, result.pauses);
+        assertEquals(0, result.ready);
+        assertEquals(0, result.failures);
+        assertFalse(controller.isLoading());
+        assertTrue(controller.hasMore());
+        assertEquals(1, source.requests);
+        source.pending.onPaused("late duplicate");
+        assertEquals(1, result.pauses);
+        controller.ensureNext(0, result);
+        assertEquals(2, source.requests);
+        source.pending.onLoaded(Arrays.asList(photo("1"), photo("2")), false);
+        assertTrue(result.available);
+    }
+
+    @Test public void destroyedDetailIgnoresLatePause() {
+        Source source = new Source();
+        MediaPageController controller = new MediaPageController(Collections.singletonList(photo("1")), source);
+        Result result = new Result();
+        controller.ensureNext(0, result);
+        controller.close();
+        source.pending.onPaused("late");
+        assertEquals(0, result.pauses);
+        assertFalse(controller.isLoading());
+    }
+
+    @Test public void detailCannotAccumulateBeyondWindowEvenWithBuggySource() {
+        Source source = new Source();
+        MediaPageController controller = new MediaPageController(Collections.singletonList(photo("0")), source);
+        Result result = new Result();
+        controller.ensureNext(0, result);
+        java.util.ArrayList<MediaItem> excessive = new java.util.ArrayList<>();
+        for (int i = 0; i < 10000; i++) excessive.add(photo("" + i));
+        source.pending.onLoaded(excessive, true);
+        assertEquals(com.fnphoto.tv.paging.MetadataLimits.MAX_ITEMS, controller.getItems().size());
+        assertFalse(controller.hasMore());
+        assertNotNull(controller.getBoundaryMessage());
+    }
+
+    @Test public void exactWindowStopsBeforeAnotherNetworkRequest() {
+        Source source = new Source();
+        java.util.ArrayList<MediaItem> initial = new java.util.ArrayList<>();
+        for (int i = 0; i < com.fnphoto.tv.paging.MetadataLimits.MAX_ITEMS; i++) initial.add(photo("" + i));
+        MediaPageController controller = new MediaPageController(initial, source);
+        assertFalse(controller.hasMore());
+        assertNotNull(controller.getBoundaryMessage());
+        controller.ensureNext(initial.size() - 1, new Result());
+        assertEquals(0, source.requests);
     }
 }

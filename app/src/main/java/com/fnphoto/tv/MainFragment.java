@@ -15,7 +15,9 @@ import androidx.leanback.widget.*;
 import com.fnphoto.tv.api.FnAuthUtils;
 import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.api.HttpClientProvider;
-import com.google.gson.Gson;
+import com.fnphoto.tv.paging.MetadataLimits;
+import com.fnphoto.tv.api.GeoPhotoResponseReader;
+import com.fnphoto.tv.api.MetadataResponseInterceptor;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -56,7 +58,18 @@ public class MainFragment extends BrowseSupportFragment {
     private int previewRequests;
     private int previewScreen; // 0: inactive, 1: timeline, 2: person timeline
     private MainPagingState photoPaging;
+    private final SparseScanBudget photoScan = new SparseScanBudget(MetadataLimits.MAX_SCAN_PAGES);
+    private boolean timelineLimited;
+    private boolean peopleLimited;
+    private boolean personTimelineLimited;
+    private boolean placesLimited;
+    private MediaItem geoRetryItem;
+    private String geoBoundaryMessage;
+    private String photoFailureMessage;
+    private String albumFailureMessage;
     private MainPagingState albumPaging;
+    private boolean applyingPage;
+    private int lastFilteredAutoIndex;
     private boolean albumDirectory;
     private int savedAlbumSelection = -1;
     private String photoMode;
@@ -187,6 +200,14 @@ public class MainFragment extends BrowseSupportFragment {
         if (photoPaging != null) photoPaging.cancel();
         if (albumPaging != null) albumPaging.cancel();
         photoPaging = null;
+        photoScan.reset();
+        applyingPage = false;
+        lastFilteredAutoIndex = 0;
+        geoRetryItem = null;
+        geoBoundaryMessage = null;
+        photoFailureMessage = null;
+        currentMediaList = null;
+        photoPositions.clear();
         albumDirectory = false;
         pagedLastRow = null;
         pageFooter = null;
@@ -202,6 +223,7 @@ public class MainFragment extends BrowseSupportFragment {
     private void beginRootScreen() {
         beginScreen();
         favoritesTimeline = false;
+        timelineLimited = peopleLimited = personTimelineLimited = placesLimited = false;
         photoMode = null;
         timelineItems = null;
         currentMediaList = null;
@@ -268,9 +290,19 @@ public class MainFragment extends BrowseSupportFragment {
                 if (item instanceof MediaItem) {
                     MediaItem mediaItem = (MediaItem) item;
                     
-                    if ("page_action".equals(mediaItem.getType())) {
-                        if (photoPaging != null) loadPhotoPage();
-                        else if (albumDirectory) loadAlbumPage();
+                    if ("geo_retry".equals(mediaItem.getType()) && geoRetryItem != null) {
+                        loadPhotosByGeo(geoRetryItem);
+                    } else if ("boundary_notice".equals(mediaItem.getType())) {
+                        new android.app.AlertDialog.Builder(getActivity()).setMessage(mediaItem.getDateStr())
+                                .setPositiveButton("知道了", null).show();
+                    } else if ("page_action".equals(mediaItem.getType())) {
+                        if (photoPaging != null) {
+                            if (isWindowFull(photoPaging, currentMediaList.size())) nextPhotoWindow();
+                            else loadPhotoPage(true);
+                        } else if (albumDirectory) {
+                            if (isWindowFull(albumPaging, savedAlbumList.size())) nextAlbumWindow();
+                            else loadAlbumPage();
+                        }
                     } else if ("date".equals(mediaItem.getType())) {
                         loadPhotosByDate(mediaItem.getDateStr(), mediaItem.getPhotoCount());
                     } else if ("person_date".equals(mediaItem.getType())) {
@@ -301,7 +333,11 @@ public class MainFragment extends BrowseSupportFragment {
                     if (photoPaging != null && ("photo".equals(mi.getType()) || "video".equals(mi.getType()))) {
                         Integer index = photoPositions.get(mi.getId());
                         if (index != null && index >= currentMediaList.size() - PREFETCH_DISTANCE
-                                && !photoPaging.hasFailed()) loadPhotoPage();
+                                && !photoPaging.hasFailed() && !applyingPage
+                                && (!isFilteredPhotoMode() || index > lastFilteredAutoIndex)) {
+                            if (isFilteredPhotoMode()) lastFilteredAutoIndex = index;
+                            loadPhotoPage();
+                        }
                     } else if (albumDirectory && "album".equals(mi.getType())) {
                         Integer index = albumPositions.get(mi.getId());
                         if (index != null && index >= savedAlbumList.size() - PREFETCH_DISTANCE
@@ -511,13 +547,15 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                Log.e(TAG, "加载时间线失败", t);
-                hideLoadingOverlay();
+                showRootLoadFailure(t);
             }
         });
     }
 
     private void displayTimeline(List<FnHttpApi.TimelineItem> items) {
+        if (rejectInvalidMetadata(items)) return;
+        timelineLimited |= items.size() > MetadataLimits.MAX_ITEMS;
+        items = boundedMetadata(items);
         previewScreen = 1;
         timelineItems = items;
         isPhotoListView = false;
@@ -556,6 +594,7 @@ public class MainFragment extends BrowseSupportFragment {
             allTimelineItems.add(item);
         }
         
+        if (timelineLimited) addUnpagedLimitNotice("日期");
         // 初始加载前几个可见项的预览
         if (!allDateItems.isEmpty()) {
             lazyLoadHandler.postDelayed(() -> loadVisiblePreviews(0), 500);
@@ -602,13 +641,15 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.FolderListResponse> call, Throwable t) {
-                Log.e(TAG, "加载文件夹失败", t);
-                hideLoadingOverlay();
+                showRootLoadFailure(t);
             }
         });
     }
 
     private void displayFolders(List<FnHttpApi.FolderItem> folders) {
+        if (rejectInvalidMetadata(folders)) return;
+        boolean limited = folders.size() > MetadataLimits.MAX_ITEMS;
+        folders = boundedMetadata(folders);
         isPhotoListView = false;
         timelineItems = null;
         mRowsAdapter.clear();
@@ -655,6 +696,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             mRowsAdapter.add(new ListRow(header, rowAdapter));
         }
+        if (limited) addUnpagedLimitNotice("文件夹目录");
     }
 
     public void loadAlbums() {
@@ -695,9 +737,17 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void loadAlbumPage() {
-        if (!albumDirectory || albumPaging == null) return;
+        if (!albumDirectory || albumPaging == null || applyingPage) return;
+        if (isWindowFull(albumPaging, savedAlbumList.size())) {
+            updatePageFooter(albumPaging, savedAlbumList.size());
+            return;
+        }
         final int offset = albumPaging.begin();
-        if (offset < 0) return;
+        if (offset < 0) {
+            updatePageFooter(albumPaging, savedAlbumList.size());
+            return;
+        }
+        albumFailureMessage = null;
         updatePageFooter(albumPaging, savedAlbumList.size());
         String params = "sort_direction=desc&sort_by=date_time&offset=" + offset + "&limit=" + PAGE_SIZE;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/list", "GET", params);
@@ -707,17 +757,20 @@ public class MainFragment extends BrowseSupportFragment {
                     Response<FnHttpApi.AlbumListResponse> response) {
                 FnHttpApi.AlbumListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
-                        || result.data == null || result.data.list == null) {
+                        || result.data == null || !validPage(result.data.list, PAGE_SIZE)) {
                     albumPaging.fail();
                 } else {
                     List<String> ids = new ArrayList<>();
                     for (FnHttpApi.NewAlbum album : result.data.list) ids.add(String.valueOf(album.albumId));
+                    applyingPage = true;
                     for (int index : albumPaging.accept(ids, null)) {
                         FnHttpApi.NewAlbum album = result.data.list.get(index);
+                        if (albumPositions.containsKey(String.valueOf(album.albumId))) continue;
                         int position = savedAlbumList.size();
                         savedAlbumList.add(album);
                         appendAlbumCard(album, position);
                     }
+                    applyingPage = false;
                 }
                 updatePageFooter(albumPaging, savedAlbumList.size());
                 if (offset == 0 && !savedAlbumList.isEmpty()) {
@@ -726,6 +779,7 @@ public class MainFragment extends BrowseSupportFragment {
             }
             @Override public void onFailure(Call<FnHttpApi.AlbumListResponse> call, Throwable error) {
                 albumPaging.fail();
+                albumFailureMessage = metadataFailureMessage(error);
                 updatePageFooter(albumPaging, savedAlbumList.size());
             }
         });
@@ -741,8 +795,10 @@ public class MainFragment extends BrowseSupportFragment {
         
         String dateStr = mediaItem.getDateStr();
         if (favoritesTimeline) {
+            SparseScanBudget budget = new SparseScanBudget(MetadataLimits.MAX_SCAN_PAGES);
+            budget.start(true);
             loadFavoriteDatePreview(mediaItem, dateStr, new MainPagingState(PHOTO_PAGE_SIZE),
-                    new ArrayList<>(), onComplete);
+                    new ArrayList<>(), budget, onComplete);
             return;
         }
         String dateTime = dateStr.replace("-", ":");
@@ -770,7 +826,7 @@ public class MainFragment extends BrowseSupportFragment {
                                        Response<FnHttpApi.GalleryListResponse> response) {
                     if (response.isSuccessful() && response.body() != null) {
                         FnHttpApi.GalleryListResponse result = response.body();
-                        if (result.code == 0 && result.data != null && result.data.list != null) {
+                        if (result.code == 0 && result.data != null && validPage(result.data.list, Math.max(0, limit))) {
                             List<String> thumbUrls = new ArrayList<>();
                             for (FnHttpApi.GalleryPhoto photo : result.data.list) {
                                 if (!PhotoSelection.includes(favoritesTimeline, photo.isCollect)) continue;
@@ -803,7 +859,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void loadFavoriteDatePreview(MediaItem item, String date, MainPagingState paging,
-                                         List<String> urls, Runnable onComplete) {
+                                         List<String> urls, SparseScanBudget budget, Runnable onComplete) {
         int offset = paging.begin();
         if (offset < 0) {
             if (onComplete != null) onComplete.run();
@@ -820,7 +876,7 @@ public class MainFragment extends BrowseSupportFragment {
                     Response<FnHttpApi.GalleryListResponse> response) {
                 FnHttpApi.GalleryListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
-                        || result.data == null || result.data.list == null) {
+                        || result.data == null || !validPage(result.data.list, PHOTO_PAGE_SIZE)) {
                     if (onComplete != null) onComplete.run();
                     return;
                 }
@@ -835,8 +891,12 @@ public class MainFragment extends BrowseSupportFragment {
                     if (url != null) urls.add(url);
                     if (urls.size() == 4) break;
                 }
-                if (urls.size() < 4 && paging.hasMore()) {
-                    loadFavoriteDatePreview(item, date, paging, urls, onComplete);
+                if (paging.hasFailed()) {
+                    if (onComplete != null) onComplete.run();
+                    return;
+                }
+                if (budget.acceptPage(urls.size() >= 4, paging.hasMore())) {
+                    loadFavoriteDatePreview(item, date, paging, urls, budget, onComplete);
                     return;
                 }
                 item.setPreviewThumbUrls(urls);
@@ -925,7 +985,7 @@ public class MainFragment extends BrowseSupportFragment {
                                        Response<FnHttpApi.GalleryListResponse> response) {
                     if (response.isSuccessful() && response.body() != null) {
                         FnHttpApi.GalleryListResponse result = response.body();
-                        if (result.code == 0 && result.data != null && result.data.list != null) {
+                        if (result.code == 0 && result.data != null && validPage(result.data.list, Math.max(0, limit))) {
                             List<String> thumbUrls = new ArrayList<>();
                             for (FnHttpApi.GalleryPhoto photo : result.data.list) {
                                 if (photo.additional != null && photo.additional.thumbnail != null) {
@@ -969,29 +1029,27 @@ public class MainFragment extends BrowseSupportFragment {
                 hideLoadingOverlay();
                 FnHttpApi.TimelineResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
-                        || result.data == null || result.data.list == null) {
+                        || result.data == null || result.data.list == null || result.data.list.contains(null)) {
                     showEmptyState("加载失败，请重新选择媒体类型重试");
                     return;
                 }
-                String first = null;
-                String last = null;
+                TimelineDateRange range = new TimelineDateRange();
                 for (FnHttpApi.TimelineItem item : result.data.list) {
-                    String date = String.format(java.util.Locale.US, "%04d:%02d:%02d",
-                            item.year, item.month, item.day);
-                    if (first == null || date.compareTo(first) < 0) first = date;
-                    if (last == null || date.compareTo(last) > 0) last = date;
+                    if (!range.add(item.year, item.month, item.day)) {
+                        showEmptyState("时间线日期无效，无法可靠确定媒体范围；请重新选择此分类重试");
+                        return;
+                    }
                 }
-                if (first == null) {
+                if (range.isEmpty()) {
                     showEmptyState("暂无" + title);
                     return;
                 }
-                photoRangeStart = first + " 00:00:00";
-                photoRangeEnd = last + " 23:59:59";
+                photoRangeStart = range.firstDate() + " 00:00:00";
+                photoRangeEnd = range.lastDate() + " 23:59:59";
                 startPhotoPaging("media_type", title);
             }
             @Override public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable error) {
-                hideLoadingOverlay();
-                showEmptyState("加载失败，请重新选择媒体类型重试");
+                showRootLoadFailure(error);
             }
         });
     }
@@ -1040,9 +1098,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                Log.e(TAG, "加载收藏失败", t);
-                hideLoadingOverlay();
-                showEmptyState("加载失败");
+                showRootLoadFailure(t);
             }
         });
     }
@@ -1074,9 +1130,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.TimelineResponse> call, Throwable t) {
-                Log.e(TAG, "加载最近照片失败", t);
-                hideLoadingOverlay();
-                showEmptyState("加载失败");
+                showRootLoadFailure(t);
             }
         });
     }
@@ -1109,14 +1163,15 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.GeoListResponse> call, Throwable t) {
-                Log.e(TAG, "加载地点失败", t);
-                hideLoadingOverlay();
-                showEmptyState("加载失败");
+                showRootLoadFailure(t);
             }
         });
     }
 
     private void displayPlaces(List<FnHttpApi.GeoItem> places) {
+        if (rejectInvalidMetadata(places)) return;
+        placesLimited |= places.size() > MetadataLimits.MAX_ITEMS;
+        places = boundedMetadata(places);
         isPhotoListView = false;
         timelineItems = null;
         savedAlbumList = null;
@@ -1149,6 +1204,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             mRowsAdapter.add(new ListRow(header, rowAdapter));
         }
+        if (placesLimited) addUnpagedLimitNotice("地点目录");
     }
 
     private void showEmptyState(String message) {
@@ -1188,10 +1244,29 @@ public class MainFragment extends BrowseSupportFragment {
         loadPhotoPage();
     }
 
-    private void loadPhotoPage() {
-        if (photoPaging == null) return;
+    private void loadPhotoPage() { loadPhotoPage(false); }
+
+    private boolean isFilteredPhotoMode() {
+        return "favorites".equals(photoMode) || "media_type".equals(photoMode);
+    }
+
+    private void loadPhotoPage(boolean explicit) {
+        if (photoPaging == null || photoPaging.isLoading() || applyingPage) return;
+        if (isWindowFull(photoPaging, currentMediaList.size())) {
+            finishPhotoPage(true);
+            return;
+        }
+        if (isFilteredPhotoMode() && !photoScan.start(explicit)) return;
+        requestPhotoPage();
+    }
+
+    private void requestPhotoPage() {
         final int offset = photoPaging.begin();
-        if (offset < 0) return;
+        if (offset < 0) {
+            finishPhotoPage(true);
+            return;
+        }
+        photoFailureMessage = null;
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
         if ("album".equals(photoMode)) {
@@ -1222,7 +1297,7 @@ public class MainFragment extends BrowseSupportFragment {
                     Response<FnHttpApi.GalleryListResponse> response) {
                 FnHttpApi.GalleryListResponse result = response.body();
                 if (!response.isSuccessful() || result == null || result.code != 0
-                        || result.data == null || result.data.list == null) {
+                        || result.data == null || !validPage(result.data.list, PHOTO_PAGE_SIZE)) {
                     photoPaging.fail();
                     finishPhotoPage(false);
                     return;
@@ -1230,8 +1305,10 @@ public class MainFragment extends BrowseSupportFragment {
                 int previousCount = currentMediaList.size();
                 List<String> ids = new ArrayList<>();
                 for (FnHttpApi.GalleryPhoto photo : result.data.list) ids.add(String.valueOf(photo.id));
+                applyingPage = true;
                 for (int index : photoPaging.accept(ids, result.data.hasNext)) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
+                    if (photoPositions.containsKey(String.valueOf(photo.id))) continue;
                     if (!PhotoSelection.includes("favorites".equals(photoMode), photo.isCollect)
                             || !PhotoSelection.matchesCategory("media_type".equals(photoMode) ? photoCategory : null, photo.category)) continue;
                     FnHttpApi.GalleryThumbnail thumb = photo.additional != null ? photo.additional.thumbnail : null;
@@ -1250,11 +1327,16 @@ public class MainFragment extends BrowseSupportFragment {
                     photoPositions.put(item.getId(), position);
                     appendPagedCard(item, position);
                 }
-                // Advance over uncollected raw rows without ending a detail-view request early.
-                if (("favorites".equals(photoMode) || "media_type".equals(photoMode))
-                        && currentMediaList.size() == previousCount
-                        && photoPaging.hasMore()) {
-                    loadPhotoPage();
+                applyingPage = false;
+                if (photoPaging.hasFailed()) {
+                    finishPhotoPage(false);
+                    return;
+                }
+                // Sparse filters get a finite raw-page budget per action. The
+                // paused footer, not a false "empty/end", invites explicit continuation.
+                if (isFilteredPhotoMode() && photoScan.acceptPage(
+                        currentMediaList.size() > previousCount, photoPaging.hasMore())) {
+                    requestPhotoPage();
                     return;
                 }
                 finishPhotoPage(true);
@@ -1264,6 +1346,7 @@ public class MainFragment extends BrowseSupportFragment {
             }
             @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable error) {
                 photoPaging.fail();
+                photoFailureMessage = metadataFailureMessage(error);
                 finishPhotoPage(false);
             }
         });
@@ -1274,9 +1357,106 @@ public class MainFragment extends BrowseSupportFragment {
         if (detailPageCallback != null) {
             MediaListHolder.PageCallback callback = detailPageCallback;
             detailPageCallback = null;
-            if (success) callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore());
+            if (success && photoScan.isPaused()) callback.onPaused(
+                    "已扫描 " + photoPaging.getOffset() + " 条，暂未找到更多匹配");
+            else if (success) callback.onLoaded(new ArrayList<>(currentMediaList),
+                    photoPaging.hasMore() && !isWindowFull(photoPaging, currentMediaList.size()));
             else callback.onFailure();
         }
+    }
+
+    private void showRootLoadFailure(Throwable error) {
+        Log.e(TAG, "元数据加载失败", error);
+        hideLoadingOverlay();
+        showEmptyState(isMetadataLimit(error)
+                ? "响应超过安全大小，未显示结果；请改用相册、文件夹或搜索缩小范围"
+                : "加载失败，请重新选择此分类重试");
+    }
+
+    private boolean rejectInvalidMetadata(List<?> rows) {
+        if (rows != null && !rows.contains(null)) return false;
+        showEmptyState("服务器返回无效条目；未显示结果，请重新选择此分类重试");
+        return true;
+    }
+
+    private static boolean isMetadataLimit(Throwable error) {
+        for (int depth = 0; error != null && depth < 8; depth++, error = error.getCause()) {
+            if (error instanceof MetadataResponseInterceptor.LimitExceededException
+                    || error instanceof GeoPhotoResponseReader.LimitExceededException) return true;
+        }
+        return false;
+    }
+
+    private static String metadataFailureMessage(Throwable error) {
+        return isMetadataLimit(error)
+                ? "响应超过安全大小，未追加结果；请缩小范围（按确定可重试）" : null;
+    }
+
+    private static <T> List<T> boundedMetadata(List<T> rows) {
+        return MainMetadataWindow.copyUnpaged(rows);
+    }
+
+    private void addUnpagedLimitNotice(String type) {
+        addBoundaryNotice(type + "仅保留前 " + MetadataLimits.MAX_ITEMS
+                + " 项；当前接口没有可靠续页合同，结果不完整。请改用相册、文件夹或搜索缩小范围。");
+    }
+
+    private void addBoundaryNotice(String message) {
+        ArrayObjectAdapter adapter = new ArrayObjectAdapter(mCardPresenter);
+        MediaItem notice = new MediaItem("__boundary_notice", "确定：查看结果范围与限制", "boundary_notice", null, null);
+        notice.setDateStr(message);
+        adapter.add(notice);
+        // A completeness warning must be visible before scrolling hundreds of
+        // rows, not only after the potentially truncated result set.
+        mRowsAdapter.add(0, new ListRow(new HeaderItem("结果范围（按确定查看）"), adapter));
+    }
+
+    private static boolean validPage(List<?> rows, int requestedSize) {
+        if (rows == null || rows.size() > requestedSize) return false;
+        for (Object row : rows) if (row == null) return false;
+        return true;
+    }
+
+    private boolean isWindowFull(MainPagingState state, int count) {
+        return state != null && state.hasMore()
+                && !MainMetadataWindow.fitsNextPage(count, state.getPageSize());
+    }
+
+    private String scanPausedMessage() {
+        return "确定：继续扫描（已查" + photoPaging.getOffset() + "条）";
+    }
+
+    private void nextPhotoWindow() {
+        // Only an explicit list action replaces a window. Invalidate any detail
+        // source referring to the previous window before dropping its metadata.
+        requests.next();
+        positionHandler.removeCallbacksAndMessages(null);
+        MediaListHolder.clear();
+        currentMediaList = new ArrayList<>();
+        photoPositions.clear();
+        photoScan.reset();
+        lastFilteredAutoIndex = 0;
+        resetPagedRows();
+        loadPhotoPage(true);
+        positionHandler.post(() -> setSelectedPosition(0));
+    }
+
+    private void nextAlbumWindow() {
+        requests.next();
+        positionHandler.removeCallbacksAndMessages(null);
+        savedAlbumList = new ArrayList<>();
+        albumPositions.clear();
+        savedAlbumSelection = -1;
+        resetPagedRows();
+        loadAlbumPage();
+        positionHandler.post(() -> setSelectedPosition(0));
+    }
+
+    private void resetPagedRows() {
+        mRowsAdapter.clear();
+        pagedLastRow = null;
+        pageFooter = null;
+        pageFooterAdapter = null;
     }
 
     private void appendPagedCard(MediaItem item, int position) {
@@ -1293,11 +1473,18 @@ public class MainFragment extends BrowseSupportFragment {
     private void updatePageFooter(MainPagingState state, int count) {
         if (state == null) return;
         String status;
-        if (state.isLoading()) status = "正在加载…（已加载 " + count + "）";
-        else if (state.hasFailed()) status = "加载失败，按确定重试（已加载 " + count + "）";
-        else if (state.isStalled()) status = "服务器返回重复页，已停止加载（" + count + "）";
-        else if (state.hasMore()) status = "按确定加载更多（已加载 " + count + "）";
-        else status = count == 0 ? "暂无内容" : "已全部加载（" + count + "）";
+        if (state.isLoading()) status = "正在加载 · 本批 " + count + " 项";
+        else if (state.isOffsetLimited()) status = "偏移到上限 · 请缩小范围";
+        else if (state.hasInvalidPage()) status = "响应异常 · 确定重试";
+        else if (state.hasFailed()) {
+            String reason = state == photoPaging ? photoFailureMessage : albumFailureMessage;
+            status = reason != null ? "响应过大 · 缩小范围或确定重试" : "确定：重试（本批 " + count + " 项）";
+        }
+        else if (state.isStalled()) status = "结果可能不完整 · 请返回";
+        else if (isWindowFull(state, count)) status = "确定：下一批（替换本批" + count + "项）";
+        else if (state == photoPaging && photoScan.isPaused()) status = scanPausedMessage();
+        else if (state.hasMore()) status = "确定：加载更多（本批 " + count + " 项）";
+        else status = count == 0 ? "扫描到末尾 · 本批无匹配" : "扫描到末尾 · 本批 " + count + " 项";
         MediaItem action = new MediaItem("__page_action", status, "page_action", null, null);
         if (pageFooter == null) {
             pageFooterAdapter = new ArrayObjectAdapter(mCardPresenter);
@@ -1317,6 +1504,8 @@ public class MainFragment extends BrowseSupportFragment {
 
         beginScreen();
         isPhotoListView = true;
+        photoMode = "geo";
+        geoRetryItem = placeItem;
         showLoadingOverlay("正在加载地点照片...");
 
         String[] parts = placeItem.getId().split("/", 2);
@@ -1324,7 +1513,7 @@ public class MainFragment extends BrowseSupportFragment {
         final String city = parts.length > 1 ? parts[1] : "";
         final String placeName = placeItem.getTitle();
 
-        final String requestBody = "{\"keyword\":\"\",\"filters\":[{\"filterName\":\"photo_location\",\"filterValue\":\"" + country + "\",\"subFilters\":[{\"filterName\":\"" + country + "\",\"filterValue\":\"" + city + "\"}]}],\"antiFilters\":[]}";
+        final String requestBody = GeoPhotoResponseReader.requestBody(country, city);
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/search/results", "POST", requestBody);
         final String url = baseUrl + "/p/api/v1/search/results";
 
@@ -1355,55 +1544,56 @@ public class MainFragment extends BrowseSupportFragment {
                 positionHandler.post(() -> {
                     if (!requests.complete(call, generation)) return;
                     hideLoadingOverlay();
-                    showEmptyState("网络异常: " + e.getMessage());
+                    showGeoFailure(metadataFailureMessage(e) != null ? metadataFailureMessage(e)
+                            : "网络异常，请按确定重试");
                 });
             }
 
             @Override
-            public void onResponse(okhttp3.Call call, okhttp3.Response response) throws IOException {
+            public void onResponse(okhttp3.Call call, okhttp3.Response response) {
                 try {
-                    String responseBody = response.body() != null ? response.body().string() : null;
-                    Log.d(TAG, "Response code: " + response.code());
-
-
-                    if (response.isSuccessful() && responseBody != null) {
-                        Gson gson = new Gson();
-                        FnHttpApi.SearchResultsResponse result = gson.fromJson(responseBody, FnHttpApi.SearchResultsResponse.class);
-                        if (result.code == 0 && result.data != null && result.data.list != null) {
-                            final List<FnHttpApi.GalleryPhoto> photos = result.data.list;
-                            positionHandler.post(() -> {
-                                if (!requests.complete(call, generation)) return;
-                                hideLoadingOverlay();
-                                displayGeoPhotos(placeName, photos);
-                            });
-                        } else {
-                            Log.e(TAG, "地点照片返回异常: code=" + result.code);
-                            positionHandler.post(() -> {
-                                if (!requests.complete(call, generation)) return;
-                                hideLoadingOverlay();
-                                showEmptyState("暂无照片");
-                            });
-                        }
-                    } else {
-                        Log.e(TAG, "地点照片请求失败: code=" + response.code() + " body=" + responseBody);
+                    if (!response.isSuccessful() || response.body() == null) {
+                        final int status = response.code();
                         positionHandler.post(() -> {
-                                if (!requests.complete(call, generation)) return;
+                            if (!requests.complete(call, generation)) return;
                             hideLoadingOverlay();
-                            showEmptyState("请求失败(" + response.code() + ")");
+                            showGeoFailure("地点请求失败（HTTP " + status + "），按确定重试");
                         });
+                        return;
                     }
-                } catch (Exception e) {
-                    Log.e(TAG, "解析响应异常", e);
+                    final GeoPhotoResponseReader.Result result = GeoPhotoResponseReader.read(
+                            response.body().byteStream(), MetadataLimits.MAX_ITEMS,
+                            MetadataLimits.MAX_METADATA_RESPONSE_BYTES);
                     positionHandler.post(() -> {
-                                if (!requests.complete(call, generation)) return;
+                        if (!requests.complete(call, generation)) return;
                         hideLoadingOverlay();
-                        showEmptyState("解析失败");
+                        displayGeoPhotos(placeName, result);
+                    });
+                } catch (IOException | RuntimeException error) {
+                    Log.e(TAG, "地点响应读取失败", error);
+                    final String message = isMetadataLimit(error)
+                            ? "地点响应超过安全大小，未显示结果；请返回按日期、相册或文件夹浏览。按确定可重试。"
+                            : "地点结果读取失败，按确定重试；也可返回按日期或相册浏览";
+                    positionHandler.post(() -> {
+                        if (!requests.complete(call, generation)) return;
+                        hideLoadingOverlay();
+                        showGeoFailure(message);
                     });
                 } finally {
                     response.close();
                 }
             }
         });
+    }
+
+    private void showGeoFailure(String message) {
+        mRowsAdapter.clear();
+        currentMediaList = new ArrayList<>();
+        ArrayObjectAdapter adapter = new ArrayObjectAdapter(mCardPresenter);
+        MediaItem retry = new MediaItem("__geo_retry", "确定：重试地点查询", "geo_retry", null, null);
+        retry.setDateStr(message);
+        adapter.add(retry);
+        mRowsAdapter.add(new ListRow(new HeaderItem("地点加载失败"), adapter));
     }
 
     private void showLoadingOverlay(String message) {
@@ -1426,7 +1616,22 @@ public class MainFragment extends BrowseSupportFragment {
         }
     }
 
-    private void displayGeoPhotos(String placeName, List<FnHttpApi.GalleryPhoto> photos) {
+    private void displayGeoPhotos(String placeName, GeoPhotoResponseReader.Result result) {
+        List<FnHttpApi.GalleryPhoto> photos = result.photos;
+        switch (result.completeness) {
+            case CLIENT_LIMIT:
+                geoBoundaryMessage = "地点结果超过本次 " + MetadataLimits.MAX_ITEMS
+                        + " 项上限，仅显示前一批；未验证地点续页接口，请返回按日期、相册或文件夹浏览";
+                break;
+            case SERVER_HAS_MORE:
+                geoBoundaryMessage = "服务端显示仍有地点结果，但当前接口无可靠续页合同；结果不完整，请返回按日期或相册浏览";
+                break;
+            case SERVER_REPORTED_END:
+                geoBoundaryMessage = "服务端报告本次地点结果结束；本应用无法独立核验地点结果完整性";
+                break;
+            default:
+                geoBoundaryMessage = "地点接口未提供可靠结束标记；已显示本次返回结果，不能保证完整，请按日期或相册核对";
+        }
         isPhotoListView = true;
         timelineItems = null;
         mRowsAdapter.clear();
@@ -1474,6 +1679,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             mRowsAdapter.add(new ListRow(header, rowAdapter));
         }
+        addBoundaryNotice(geoBoundaryMessage);
     }
 
     public void loadPeople() {
@@ -1503,14 +1709,15 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.PersonListResponse> call, Throwable t) {
-                Log.e(TAG, "加载人物失败", t);
-                hideLoadingOverlay();
-                showEmptyState("加载失败");
+                showRootLoadFailure(t);
             }
         });
     }
 
     private void displayPeople(List<FnHttpApi.PersonItem> persons) {
+        if (rejectInvalidMetadata(persons)) return;
+        peopleLimited |= persons.size() > MetadataLimits.MAX_ITEMS;
+        persons = boundedMetadata(persons);
         isPhotoListView = false;
         timelineItems = null;
         savedPersonList = new ArrayList<>(persons);
@@ -1544,6 +1751,7 @@ public class MainFragment extends BrowseSupportFragment {
 
             mRowsAdapter.add(new ListRow(header, rowAdapter));
         }
+        if (peopleLimited) addUnpagedLimitNotice("人物目录");
     }
 
     public void loadPersonTimeline(int personId, String personName) {
@@ -1556,6 +1764,7 @@ public class MainFragment extends BrowseSupportFragment {
         currentPersonId = personId;
         currentPersonName = personName;
         savedPersonTimelineItems = null;
+        personTimelineLimited = false;
 
         beginScreen();
         showLoadingOverlay("正在加载 " + personName + " 的时间线...");
@@ -1578,14 +1787,15 @@ public class MainFragment extends BrowseSupportFragment {
 
             @Override
             public void onFailure(Call<FnHttpApi.PersonTimelineResponse> call, Throwable t) {
-                Log.e(TAG, "加载人物时间线失败", t);
-                hideLoadingOverlay();
-                showEmptyState("加载失败");
+                showRootLoadFailure(t);
             }
         });
     }
 
     private void displayPersonTimeline(List<FnHttpApi.PersonTimelineItem> items) {
+        if (rejectInvalidMetadata(items)) return;
+        personTimelineLimited |= items.size() > MetadataLimits.MAX_ITEMS;
+        items = boundedMetadata(items);
         previewScreen = 2;
         isPhotoListView = false;
         mRowsAdapter.clear();
@@ -1619,6 +1829,7 @@ public class MainFragment extends BrowseSupportFragment {
             personTimelineItemsList.add(item);
         }
 
+        if (personTimelineLimited) addUnpagedLimitNotice("人物日期");
         // 触发第一个可见区域的预览加载
         lazyLoadHandler.postDelayed(() -> {
             loadVisiblePersonPreviews(0);
@@ -1649,7 +1860,14 @@ public class MainFragment extends BrowseSupportFragment {
         }
 
         if (photoPaging == null) {
-            MediaListHolder.set(currentMediaList);
+            final String boundary = geoBoundaryMessage;
+            MediaListHolder.set(currentMediaList, boundary == null ? null : new MediaListHolder.PageSource() {
+                @Override public boolean hasMore() { return false; }
+                @Override public String getBoundaryMessage() { return boundary; }
+                @Override public void loadMore(MediaListHolder.PageCallback callback) {
+                    callback.onPaused(boundary);
+                }
+            });
         } else {
             final long generation = requests.generation();
             MediaListHolder.set(currentMediaList, new MediaListHolder.PageSource() {
@@ -1657,7 +1875,17 @@ public class MainFragment extends BrowseSupportFragment {
                         new MainPagingState.DeliveryCursor(currentMediaList.size());
                 @Override public boolean hasMore() {
                     return requests.isCurrent(generation) && photoPaging != null
-                            && (delivery.hasPending(currentMediaList.size()) || photoPaging.hasMore());
+                            && (delivery.hasPending(currentMediaList.size()) || (photoPaging.hasMore()
+                            && !isWindowFull(photoPaging, currentMediaList.size())));
+                }
+                @Override public String getBoundaryMessage() {
+                    if (!requests.isCurrent(generation) || photoPaging == null)
+                        return "列表已切换，请返回列表重新打开";
+                    if (isWindowFull(photoPaging, currentMediaList.size()))
+                        return "本批已达内存上限，请返回列表选择下一批";
+                    if (photoPaging.isStalled()) return "服务器返回重复或矛盾空页；结果可能不完整，请返回列表";
+                    if (photoPaging.isOffsetLimited()) return "已到接口偏移上限，请返回列表缩小查询范围";
+                    return null;
                 }
                 @Override public void loadMore(MediaListHolder.PageCallback callback) {
                     if (!hasMore() || detailPageCallback != null) {
@@ -1668,7 +1896,8 @@ public class MainFragment extends BrowseSupportFragment {
                     // Deliver that buffered tail before consulting/fetching the next network page.
                     if (delivery.hasPending(currentMediaList.size())) {
                         delivery.delivered(currentMediaList.size());
-                        callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore());
+                        callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore()
+                                && !isWindowFull(photoPaging, currentMediaList.size()));
                         return;
                     }
                     detailPageCallback = new MediaListHolder.PageCallback() {
@@ -1677,9 +1906,10 @@ public class MainFragment extends BrowseSupportFragment {
                             callback.onLoaded(items, hasMore);
                         }
                         @Override public void onFailure() { callback.onFailure(); }
+                        @Override public void onPaused(String message) { callback.onPaused(message); }
                     };
                     // A list prefetch may already be in flight; its completion also serves this callback.
-                    if (!photoPaging.isLoading()) loadPhotoPage();
+                    if (!photoPaging.isLoading()) loadPhotoPage(true);
                 }
             });
         }

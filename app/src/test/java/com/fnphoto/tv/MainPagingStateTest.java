@@ -52,10 +52,22 @@ public class MainPagingStateTest {
         state.accept(Collections.singletonList("b"), false);
         assertFalse(state.hasMore());
     }
-    @Test public void emptyPageTerminatesEvenWithErroneousHasNext() {
+    @Test public void missingHasNextDoesNotTurnShortPageIntoFalseEnd() {
+        MainPagingState state = new MainPagingState(35);
+        for (int i = 0; i < 3; i++) {
+            assertEquals(i, state.begin());
+            assertEquals(Collections.singletonList(0), state.accept(Collections.singletonList("id" + i), null));
+            assertTrue(state.hasMore());
+        }
+        assertEquals(3, state.begin());
+        state.accept(Collections.emptyList(), null);
+        assertFalse(state.hasMore());
+        assertFalse(state.isStalled());
+    }
+    @Test public void contradictoryEmptyPageStopsWithIncompleteWarning() {
         MainPagingState state = new MainPagingState(2);
         state.begin(); state.accept(Collections.emptyList(), true);
-        assertFalse(state.hasMore()); assertFalse(state.isStalled());
+        assertFalse(state.hasMore()); assertTrue(state.isStalled());
     }
     @Test public void cancelDoesNotLoseOffsetOrPreventResume() {
         MainPagingState state = new MainPagingState(2);
@@ -111,4 +123,70 @@ public class MainPagingStateTest {
     @Test(expected = IllegalArgumentException.class) public void invalidPageSizeRejected() {
         new MainPagingState(0);
     }
+    @Test public void oversizedServerPageDoesNotSkipRowsAndCanRetry() {
+        MainPagingState state = new MainPagingState(2);
+        state.begin();
+        assertTrue(state.accept(Arrays.asList("a", "b", "c"), true).isEmpty());
+        assertTrue(state.hasFailed());
+        assertTrue(state.hasInvalidPage());
+        assertEquals(0, state.getOffset());
+        assertEquals(0, state.retainedIdCount());
+        assertEquals(0, state.begin());
+        assertEquals(Arrays.asList(0, 1), state.accept(Arrays.asList("a", "b"), true));
+        assertFalse(state.hasInvalidPage());
+    }
+
+    @Test public void integerOffsetLimitStopsBeforeIssuingAnUnsafeRequest() throws Exception {
+        MainPagingState state = new MainPagingState(2);
+        java.lang.reflect.Field offset = MainPagingState.class.getDeclaredField("offset");
+        offset.setAccessible(true);
+        offset.setInt(state, Integer.MAX_VALUE - 1);
+        assertEquals(-1, state.begin());
+        assertTrue(state.isOffsetLimited());
+        assertFalse(state.hasMore());
+        assertEquals(Integer.MAX_VALUE - 1, state.getOffset());
+        assertEquals(0, state.retainedIdCount());
+    }
+
+    @Test public void nullIdRejectsTheWholePageWithoutMutatingDedupOrOffset() {
+        MainPagingState state = new MainPagingState(2);
+        state.begin();
+        assertTrue(state.accept(Arrays.asList("a", null), true).isEmpty());
+        assertTrue(state.hasInvalidPage());
+        assertEquals(0, state.getOffset());
+        assertEquals(0, state.retainedIdCount());
+        state.begin();
+        assertEquals(Arrays.asList(0, 1), state.accept(Arrays.asList("a", "b"), false));
+    }
+
+    @Test public void rawScanDeduplicationMemoryIsBoundedAcrossHundredThousandRows() {
+        MainPagingState state = new MainPagingState(35);
+        int rows = 100000;
+        while (state.hasMore()) {
+            int offset = state.begin();
+            List<String> ids = new ArrayList<>();
+            for (int n = offset; n < Math.min(rows, offset + 35); n++) ids.add("id" + n);
+            state.accept(ids, offset + ids.size() < rows);
+            assertTrue(state.retainedIdCount() <= 70);
+        }
+        assertEquals(rows, state.getOffset());
+    }
+
+    @Test public void realEmptyTerminalPageIsNotAnIncompleteWarning() {
+        MainPagingState state = new MainPagingState(35);
+        state.begin(); state.accept(Collections.emptyList(), false);
+        assertFalse(state.hasMore());
+        assertFalse(state.isStalled());
+    }
+
+    @Test public void repeatedOldIdWithinOnePageStaysKnownWhenOtherIdsEvictHistory() {
+        MainPagingState state = new MainPagingState(3);
+        state.begin(); state.accept(Arrays.asList("a", "b", "c"), true);
+        state.begin(); state.accept(Arrays.asList("d", "e", "f"), true);
+        state.begin();
+        assertEquals(Collections.singletonList(1), state.accept(Arrays.asList("a", "g", "a"), true));
+        assertEquals(9, state.getOffset());
+        assertTrue(state.retainedIdCount() <= 6);
+    }
+
 }

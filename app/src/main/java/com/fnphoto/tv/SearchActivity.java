@@ -157,7 +157,10 @@ public class SearchActivity extends FragmentActivity {
         tvStatus.setTextColor(Color.parseColor("#A8AFBF"));
         tvStatus.setTextSize(13);
         tvStatus.setPadding(dp(72), dp(14), dp(64), dp(6));
-        tvStatus.setOnClickListener(v -> loadSearchPage(true));
+        tvStatus.setOnClickListener(v -> {
+            if (pages.isWindowFull()) startNextWindow();
+            else loadSearchPage(true);
+        });
         rootLayout.addView(tvStatus);
 
         // 结果网格
@@ -271,9 +274,9 @@ public class SearchActivity extends FragmentActivity {
         final GridPageState.Request page = pages.begin(retry);
         if (page == null) return;
         updateSearchStatus();
-        String params = "keyword=" + currentQuery + "&limit=" + PAGE_LIMIT + "&offset=" + page.offset;
+        String params = "keyword=" + currentQuery + "&limit=" + page.limit + "&offset=" + page.offset;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/search", "GET", params);
-        searchCall = api.searchPhotos(token, authx, currentQuery, PAGE_LIMIT, page.offset);
+        searchCall = api.searchPhotos(token, authx, currentQuery, page.limit, page.offset);
         searchCall.enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
             @Override public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
                     Response<FnHttpApi.GalleryListResponse> response) {
@@ -286,10 +289,15 @@ public class SearchActivity extends FragmentActivity {
                     return;
                 }
                 List<FnHttpApi.GalleryPhoto> batch = result.data.list;
+                if (batch.size() > page.limit) {
+                    pages.reject(page);
+                    updateSearchStatus();
+                    return;
+                }
                 List<Integer> ids = new ArrayList<>();
-                for (FnHttpApi.GalleryPhoto photo : batch) ids.add(photo.id);
+                for (FnHttpApi.GalleryPhoto photo : batch) ids.add(photo == null ? null : photo.id);
                 boolean[] additions = pages.accept(page, ids, result.data.hasNext);
-                if (additions == null) return;
+                if (additions == null) { updateSearchStatus(); return; }
                 int start = searchResults.size();
                 for (int i = 0; i < batch.size(); i++) {
                     if (additions[i]) {
@@ -308,11 +316,26 @@ public class SearchActivity extends FragmentActivity {
         });
     }
 
+    private void startNextWindow() {
+        if (!pages.nextWindow()) return;
+        dataGeneration = new Object();
+        MediaListHolder.clear();
+        searchResults.clear();
+        mediaItems.clear();
+        adapter.notifyDataSetChanged();
+        rvResults.scrollToPosition(0);
+        loadSearchPage(false);
+    }
+
     private void updateSearchStatus() {
-        tvStatus.setFocusable(pages.hasError());
-        tvStatus.setClickable(pages.hasError());
+        tvStatus.setFocusable(pages.hasError() || pages.isWindowFull());
+        tvStatus.setClickable(pages.hasError() || pages.isWindowFull());
         if (currentQuery.isEmpty()) tvStatus.setText("输入关键词开始搜索");
+        else if (pages.isInvalidPage()) tvStatus.setText("服务器分页响应超限或无效，未跳过记录；按确定重试或缩小关键词范围");
         else if (pages.hasError()) tvStatus.setText("加载失败，按确定重试（已加载 " + searchResults.size() + " 项）");
+        else if (pages.isWindowFull()) tvStatus.setText("本批已扫描 " + pages.getWindowRows() + " 条、显示 "
+                + searchResults.size() + " 项；按确定查看下一批（替换当前列表）");
+        else if (pages.isOffsetLimit()) tvStatus.setText(pages.boundaryMessage());
         else if (pages.isStalled()) tvStatus.setText("服务器返回重复页，已停止加载（已加载 " + searchResults.size() + " 项）");
         else if (pages.isLoading()) tvStatus.setText(searchResults.isEmpty() ? "搜索中..." : "正在加载更多...");
         else tvStatus.setText("已加载 " + searchResults.size() + " 个结果" + (pages.hasMore() ? "，下移加载更多" : ""));
@@ -440,6 +463,10 @@ public class SearchActivity extends FragmentActivity {
             private final GridPageState.Delivery delivery = new GridPageState.Delivery(mediaItems.size());
             @Override public boolean hasMore() {
                 return !(destroyed || generation != dataGeneration) && delivery.hasMore(mediaItems.size(), pages.hasMore());
+            }
+            @Override public String getBoundaryMessage() {
+                return destroyed || generation != dataGeneration ? "搜索条件已变更，请返回列表重新选择"
+                        : pages.boundaryMessage();
             }
             @Override public void loadMore(MediaListHolder.PageCallback callback) {
                 if (destroyed || generation != dataGeneration) { callback.onFailure(); return; }

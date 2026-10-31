@@ -74,9 +74,17 @@ public class GridPageStateTest {
         assertFalse(state.hasMore());
     }
 
-    @Test public void shortPageWithoutMetadataEnds() {
+    @Test public void shortPageWithoutMetadataContinuesUntilEmptyProbe() {
         GridPageState state = new GridPageState(2);
         state.accept(state.begin(false), Collections.singletonList(1), null);
+        assertTrue(state.hasMore());
+        GridPageState.Request second = state.begin(false);
+        assertEquals(1, second.offset);
+        state.accept(second, Collections.singletonList(2), null);
+        assertTrue(state.hasMore());
+        GridPageState.Request probe = state.begin(false);
+        assertEquals(2, probe.offset);
+        state.accept(probe, Collections.emptyList(), null);
         assertFalse(state.hasMore());
     }
 
@@ -116,5 +124,131 @@ public class GridPageStateTest {
         delivery.delivered(200);
         assertFalse(delivery.hasBuffered(200));
         assertTrue(delivery.hasMore(200, true));
+    }
+
+    @Test public void hundredThousandRowsStayWithinWindowAndResumeWithoutSkipping() {
+        GridPageState state = new GridPageState(100, 1200);
+        int consumed = 0;
+        int windows = 1;
+        while (consumed < 100000) {
+            if (state.isWindowFull()) {
+                assertFalse(state.hasMore());
+                assertNull(state.begin(true));
+                assertNotNull(state.boundaryMessage());
+                assertTrue(state.nextWindow());
+                assertEquals(0, state.getSeenCount());
+                windows++;
+            }
+            GridPageState.Request request = state.begin(false);
+            assertNotNull(request);
+            assertEquals(consumed, request.offset);
+            int count = Math.min(request.limit, 100000 - consumed);
+            java.util.List<Integer> ids = new java.util.ArrayList<>();
+            for (int i = 0; i < count; i++) ids.add(consumed + i);
+            boolean[] added = state.accept(request, ids, consumed + count < 100000);
+            for (boolean value : added) assertTrue(value);
+            consumed += count;
+            assertTrue(state.getSeenCount() <= 1200);
+            assertTrue(state.getWindowRows() <= 1200);
+        }
+        assertEquals(84, windows);
+        assertFalse(state.hasMore());
+        assertFalse(state.isWindowFull());
+        assertNull(state.boundaryMessage());
+    }
+
+    @Test public void partialWindowRequestUsesRemainingBudgetAndDoesNotLoseRows() {
+        GridPageState state = new GridPageState(3, 5);
+        state.accept(state.begin(false), Arrays.asList(1, 2, 3), true);
+        GridPageState.Request last = state.begin(false);
+        assertEquals(3, last.offset);
+        assertEquals(2, last.limit);
+        state.accept(last, Arrays.asList(4, 5), true);
+        assertTrue(state.isWindowFull());
+        assertTrue(state.nextWindow());
+        GridPageState.Request next = state.begin(false);
+        assertEquals(5, next.offset);
+        assertEquals(3, next.limit);
+        assertNull(state.accept(last, Arrays.asList(4, 5), true));
+        assertTrue(state.isCurrent(next));
+    }
+
+    @Test public void oversizedResponseRejectedAtomicallyAndRetryKeepsOffset() {
+        GridPageState state = new GridPageState(2, 4);
+        GridPageState.Request first = state.begin(false);
+        assertNull(state.accept(first, Arrays.asList(1, 2, 3), true));
+        assertTrue(state.hasError());
+        assertTrue(state.isInvalidPage());
+        assertEquals(0, state.getOffset());
+        assertEquals(0, state.getSeenCount());
+        assertNull(state.begin(false));
+        GridPageState.Request retry = state.begin(true);
+        assertEquals(0, retry.offset);
+        assertFalse(state.isInvalidPage());
+        assertArrayEquals(new boolean[]{true, true}, state.accept(retry, Arrays.asList(1, 2), true));
+    }
+
+    @Test public void nullRowsRejectWholePageRatherThanAdvancePastMissingRows() {
+        GridPageState state = new GridPageState(2);
+        assertNull(state.accept(state.begin(false), Arrays.asList(1, null), true));
+        assertTrue(state.hasError());
+        assertEquals(0, state.getSeenCount());
+        assertEquals(0, state.getOffset());
+    }
+
+    @Test public void duplicateRowsConsumeBoundedRawBudget() {
+        GridPageState state = new GridPageState(3, 6);
+        state.accept(state.begin(false), Arrays.asList(1, 1, 2), true);
+        state.accept(state.begin(false), Arrays.asList(2, 2, 3), true);
+        assertEquals(3, state.getSeenCount());
+        assertEquals(6, state.getWindowRows());
+        assertTrue(state.isWindowFull());
+    }
+
+    @Test public void failureAfterWindowChangeDoesNotSkipAndResetInvalidatesIt() {
+        GridPageState state = new GridPageState(2, 2);
+        state.accept(state.begin(false), Arrays.asList(1, 2), true);
+        assertTrue(state.nextWindow());
+        GridPageState.Request failed = state.begin(false);
+        assertTrue(state.fail(failed));
+        GridPageState.Request retry = state.begin(true);
+        assertEquals(2, retry.offset);
+        state.reset();
+        assertNull(state.accept(retry, Arrays.asList(3, 4), true));
+        assertEquals(0, state.begin(false).offset);
+    }
+
+    @Test public void nextWindowCannotDiscardInFlightOrClosedState() {
+        GridPageState state = new GridPageState(2, 2);
+        state.begin(false);
+        assertFalse(state.nextWindow());
+        state.close();
+        assertFalse(state.nextWindow());
+        assertNull(state.begin(true));
+    }
+
+    @Test public void integerOffsetBoundaryNeverWrapsNegative() throws Exception {
+        GridPageState state = new GridPageState(100);
+        java.lang.reflect.Field offset = GridPageState.class.getDeclaredField("offset");
+        offset.setAccessible(true);
+        offset.setInt(state, Integer.MAX_VALUE - 1);
+        GridPageState.Request request = state.begin(false);
+        assertEquals(Integer.MAX_VALUE - 1, request.offset);
+        assertEquals(1, request.limit);
+        state.accept(request, Collections.singletonList(1), true);
+        assertEquals(Integer.MAX_VALUE, state.getOffset());
+        assertTrue(state.isOffsetLimit());
+        assertFalse(state.hasMore());
+        assertFalse(state.nextWindow());
+        assertNull(state.begin(true));
+        assertNotNull(state.boundaryMessage());
+    }
+
+    @Test public void explicitEndExactlyAtWindowBoundaryIsNotTruncation() {
+        GridPageState state = new GridPageState(2, 2);
+        state.accept(state.begin(false), Arrays.asList(1, 2), false);
+        assertFalse(state.isWindowFull());
+        assertFalse(state.nextWindow());
+        assertNull(state.boundaryMessage());
     }
 }

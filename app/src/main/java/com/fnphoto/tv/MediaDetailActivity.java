@@ -639,6 +639,13 @@ public class MediaDetailActivity extends FragmentActivity {
                     if (slideshowActive) stopSlideshow();
                     Toast.makeText(MediaDetailActivity.this, "加载下一页失败，按右键重试", Toast.LENGTH_LONG).show();
                 }
+                @Override public void onPaused(String message) {
+                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                    hideLoading();
+                    if (slideshowActive) stopSlideshow();
+                    Toast.makeText(MediaDetailActivity.this,
+                            message + "；按右键继续扫描或返回退出", Toast.LENGTH_LONG).show();
+                }
             });
         } else {
             finishNavigation();
@@ -646,6 +653,12 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void finishNavigation() {
+            String boundary = pageController == null ? null : pageController.getBoundaryMessage();
+            if (boundary != null) {
+                if (slideshowActive) stopSlideshow();
+                Toast.makeText(this, boundary, Toast.LENGTH_LONG).show();
+                return;
+            }
             if (slideshowActive) {
                 stopSlideshow();
                 Toast.makeText(this, "幻灯片播放结束", Toast.LENGTH_SHORT).show();
@@ -1090,7 +1103,8 @@ public class MediaDetailActivity extends FragmentActivity {
                     return;
                 }
                 sessionStore.save(sessionId, sessionOwner, mediaList,
-                        restoredWithoutPaging || pageController.hasMore(), mediaSourceEndpoint);
+                        restoredWithoutPaging || pageController.hasMore()
+                                || pageController.getBoundaryMessage() != null, mediaSourceEndpoint);
                 outState.putString("DETAIL_SESSION", sessionId);
                 outState.putInt("DETAIL_INDEX", currentIndex);
             } catch (java.io.IOException e) { Log.w(TAG, "Cannot save detail session", e); }

@@ -145,7 +145,11 @@ public class CardPresenter extends Presenter {
         cardView.setTag(R.id.media_item_id, mediaItem.getId());
         cardView.setTag(R.id.media_item_type, mediaItem.getType());
 
-        if ("date".equals(mediaItem.getType()) || "person_date".equals(mediaItem.getType())) {
+        if ("geo_retry".equals(mediaItem.getType())) {
+            cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
+            cardView.setMainImage(createPlaceholderDrawable(cardView.getContext()));
+            cardView.setContentText(mediaItem.getDateStr());
+        } else if ("date".equals(mediaItem.getType()) || "person_date".equals(mediaItem.getType())) {
             cardView.setMainImageDimensions(DATE_CARD_WIDTH, DATE_CARD_HEIGHT);
             
             List<String> previewUrls = mediaItem.getPreviewThumbUrls();
