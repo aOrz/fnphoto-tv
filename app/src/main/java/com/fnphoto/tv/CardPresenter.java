@@ -137,6 +137,9 @@ public class CardPresenter extends Presenter {
         CachedImageLoader.clear(cardView.getMainImageView());
 
         cardView.setTitleText(mediaItem.getTitle());
+        // A pooled card may previously have represented an album/person/folder.
+        // Photo, video and date branches do not set a subtitle of their own.
+        cardView.setContentText(null);
         
         // 存储当前item的ID和类型，用于检查视图是否已被重用
         cardView.setTag(R.id.media_item_id, mediaItem.getId());

@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import androidx.leanback.app.BrowseSupportFragment;
+import androidx.leanback.app.RowsSupportFragment;
 import androidx.leanback.widget.*;
 
 import com.fnphoto.tv.api.FnAuthUtils;
@@ -430,12 +431,27 @@ public class MainFragment extends BrowseSupportFragment {
             for (int row = 0; row < mRowsAdapter.size(); row++) {
                 Object value = mRowsAdapter.get(row);
                 if (value instanceof ListRow && ((ListRow) value).getAdapter() == adapter) {
-                    setSelectedPosition(row, false,
-                            new ListRowPresenter.SelectItemViewHolderTask(adapter.indexOf(target)));
+                    restoreCardSelection(row, adapter.indexOf(target));
                     return;
                 }
             }
         });
+    }
+
+    private void restoreCardSelection(int row, int column) {
+        if (!isAdded() || getView() == null || row < 0 || row >= mRowsAdapter.size()
+                || column < 0) return;
+        RowsSupportFragment rows = getRowsSupportFragment();
+        if (rows == null || rows.getVerticalGridView() == null) {
+            setSelectedPosition(row, false);
+            return;
+        }
+        // BrowseSupportFragment's task overload always starts a headers transition in
+        // Leanback 1.0.0, which throws with our HEADERS_DISABLED configuration.
+        // Apply the item task directly to the rows; their selection listener keeps
+        // BrowseSupportFragment's selected row in sync without touching headers.
+        rows.setSelectedPosition(row, false,
+                new ListRowPresenter.SelectItemViewHolderTask(column));
     }
 
     public void loadTimeline() {
@@ -633,8 +649,7 @@ public class MainFragment extends BrowseSupportFragment {
         updatePageFooter(albumPaging, savedAlbumList.size());
         if (savedAlbumSelection >= 0 && savedAlbumSelection < albums.size()) {
             final int position = savedAlbumSelection;
-            positionHandler.post(() -> setSelectedPosition(position / 6, false,
-                    new ListRowPresenter.SelectItemViewHolderTask(position % 6)));
+            positionHandler.post(() -> restoreCardSelection(position / 6, position % 6));
         }
     }
 
