@@ -16,6 +16,7 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -32,6 +33,8 @@ import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.api.HttpClientProvider;
 import com.fnphoto.tv.cache.CachedImageLoader;
 import com.fnphoto.tv.player.AuthenticatedHttpDataSourceFactory;
+import com.fnphoto.tv.player.VideoLoadErrorPolicy;
+import com.fnphoto.tv.player.VideoPlaybackFailure;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.SimpleExoPlayer;
 import com.google.android.exoplayer2.source.ProgressiveMediaSource;
@@ -53,6 +56,7 @@ public class MediaDetailActivity extends FragmentActivity {
     private static final String TAG = "MediaDetailActivity";
     private static final long DEBOUNCE_TIME = 300;
     private static final long SLIDESHOW_INTERVAL = 5000;
+    private static final long VIDEO_WAIT_TIMEOUT_MS = 15000;
     private static final float ZOOM_STEP = 0.25f;
     private static final float MAX_SCALE = 5.0f;
     private static final float MIN_SCALE = 0.5f;
@@ -97,6 +101,9 @@ public class MediaDetailActivity extends FragmentActivity {
     private int currentIndex;
     private Handler debounceHandler = new Handler(Looper.getMainLooper());
     private Handler slideshowHandler = new Handler(Looper.getMainLooper());
+    private final Handler playbackHandler = new Handler(Looper.getMainLooper());
+    private Runnable playbackTimeout;
+    private String videoErrorMessage;
     private boolean canSwitch = true;
     private boolean isVideoPlaying = false;
     private MediaItem currentVideoItem;
@@ -167,7 +174,14 @@ public class MediaDetailActivity extends FragmentActivity {
             api = retrofit.create(FnHttpApi.class);
         }
 
-        showCurrentMedia();
+        String savedError = savedInstanceState != null
+                ? savedInstanceState.getString("VIDEO_ERROR_MESSAGE") : null;
+        if (savedError != null && "video".equals(mediaList.get(currentIndex).getType())) {
+            currentVideoItem = mediaList.get(currentIndex);
+            showVideoError(savedError);
+        } else {
+            showCurrentMedia();
+        }
     }
 
     private void showCurrentMedia() {
@@ -184,6 +198,7 @@ public class MediaDetailActivity extends FragmentActivity {
         releasePlayers();
         isVideoPlaying = false;
         currentVideoItem = null;
+        videoErrorMessage = null;
         currentScale = 1.0f;
         isZoomed = false;
 
@@ -318,6 +333,7 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void releasePlayers() {
+        clearVideoTimeout();
         fallbackPlayback.reset();
         if (playerView != null) playerView.setPlayer(null);
         if (player != null) {
@@ -330,6 +346,7 @@ public class MediaDetailActivity extends FragmentActivity {
             old.setOnPreparedListener(null);
             old.setOnErrorListener(null);
             old.setOnCompletionListener(null);
+            old.setOnInfoListener(null);
             old.release();
         }
         playerView = null;
@@ -340,7 +357,9 @@ public class MediaDetailActivity extends FragmentActivity {
         clearImageRequests();
         releasePlayers();
         isVideoPlaying = true;
+        videoErrorMessage = null;
         currentVideoItem = item;
+        hideInfoOverlay();
 
         container.removeAllViews();
         showLoading();
@@ -351,14 +370,11 @@ public class MediaDetailActivity extends FragmentActivity {
         String currentEndpoint = currentPrefs.getString("nas_url", baseUrl);
         token = currentPrefs.getString("api_token", "");
         String videoUrl = currentEndpoint + "/p/api/v1/stream/v/" + videoId;
-        Log.d(TAG, "Playing video: " + videoUrl);
-
-        if (!tryExoPlayer(videoUrl)) {
-            setupMediaPlayer(videoUrl);
-        }
+        Log.d(TAG, "Starting video playback");
+        setupExoPlayer(videoUrl);
     }
 
-    private boolean tryExoPlayer(String videoUrl) {
+    private void setupExoPlayer(String videoUrl) {
         try {
             playerView = new PlayerView(this);
             playerView.setLayoutParams(new FrameLayout.LayoutParams(
@@ -378,16 +394,15 @@ public class MediaDetailActivity extends FragmentActivity {
                 @Override
                 public void onPlayerError(com.google.android.exoplayer2.ExoPlaybackException error) {
                     if (!loadState.isCurrent(generation) || player != requestedPlayer) return;
-                    Log.e(TAG, "ExoPlayer error, falling back to MediaPlayer", error);
-                    hideLoading();
-                    if (player != null) {
-                        player.release();
-                        player = null;
+                    VideoPlaybackFailure failure = VideoPlaybackFailure.classify(error);
+                    if (!failure.shouldFallback()) {
+                        Log.w(TAG, "ExoPlayer playback failed; no platform retry", error);
+                        showVideoError(failure.getUserMessage());
+                        return;
                     }
-                    if (playerView != null) {
-                        container.removeView(playerView);
-                        playerView = null;
-                    }
+                    Log.w(TAG, "ExoPlayer format/decoder failure; trying platform player", error);
+                    releasePlayers();
+                    container.removeAllViews();
                     showLoading();
                     setupMediaPlayer(videoUrl);
                 }
@@ -395,8 +410,13 @@ public class MediaDetailActivity extends FragmentActivity {
                 @Override
                 public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
                     if (!loadState.isCurrent(generation) || player != requestedPlayer) return;
-                    if (playbackState == Player.STATE_READY) hideLoading();
+                    if (playbackState == Player.STATE_BUFFERING) armVideoTimeout(generation);
+                    if (playbackState == Player.STATE_READY) {
+                        clearVideoTimeout();
+                        hideLoading();
+                    }
                     if (playbackState == Player.STATE_ENDED) {
+                        clearVideoTimeout();
                         if (slideshowActive) {
                             switchToNext();
                         }
@@ -406,21 +426,24 @@ public class MediaDetailActivity extends FragmentActivity {
 
             android.net.Uri uri = android.net.Uri.parse(videoUrl);
             ProgressiveMediaSource mediaSource = new ProgressiveMediaSource.Factory(dataSourceFactory)
+                    .setLoadErrorHandlingPolicy(new VideoLoadErrorPolicy())
                     .createMediaSource(uri);
+            armVideoTimeout(generation);
+            showLoading();
             player.prepare(mediaSource);
             player.setPlayWhenReady(true);
-            return true;
-        } catch (Exception e) {
-            Log.w(TAG, "ExoPlayer init failed, falling back to MediaPlayer", e);
-            if (player != null) {
-                player.release();
-                player = null;
+        } catch (Exception | LinkageError e) {
+            VideoPlaybackFailure failure = VideoPlaybackFailure.classify(e);
+            if (failure.shouldFallback()) {
+                Log.w(TAG, "ExoPlayer initialization compatibility failure; trying platform player", e);
+                releasePlayers();
+                container.removeAllViews();
+                showLoading();
+                setupMediaPlayer(videoUrl);
+            } else {
+                Log.w(TAG, "ExoPlayer initialization failed", e);
+                showVideoError(failure.getUserMessage());
             }
-            if (playerView != null) {
-                container.removeView(playerView);
-                playerView = null;
-            }
-            return false;
         }
     }
 
@@ -438,58 +461,135 @@ public class MediaDetailActivity extends FragmentActivity {
             final long generation = loadState.next();
             java.util.Map<String, String> headers = new java.util.HashMap<>();
             headers.put("accesstoken", token != null ? token : "");
-            mp.setDataSource(this, android.net.Uri.parse(videoUrl), headers);
+            android.net.Uri uri = android.net.Uri.parse(videoUrl);
+            headers.put("authx", FnAuthUtils.generateAuthX(uri.getEncodedPath(), "GET", uri.getEncodedQuery()));
+            mp.setDataSource(this, uri, headers);
+            armVideoTimeout(generation);
+            showLoading();
 
             sv.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
                 @Override
                 public void surfaceCreated(android.view.SurfaceHolder holder) {
                     if (!loadState.isCurrent(generation) || fallbackPlayer != mp) return;
-                    mp.setDisplay(holder);
-                    mp.prepareAsync();
+                    try {
+                        mp.setDisplay(holder);
+                        mp.prepareAsync();
+                    } catch (RuntimeException failure) {
+                        showVideoError(VideoPlaybackFailure.classify(failure).getUserMessage());
+                    }
                 }
                 @Override
                 public void surfaceChanged(android.view.SurfaceHolder holder, int format, int w, int h) {}
                 @Override
                 public void surfaceDestroyed(android.view.SurfaceHolder holder) {
-                    if (fallbackPlayer == mp) {
-                        fallbackPlayer = null;
-                        fallbackPlayback.reset();
-                        mp.release();
-                    }
+                    // Defer view removal until SurfaceHolder has finished its callback.
+                    playbackHandler.post(() -> {
+                        if (loadState.isCurrent(generation) && fallbackPlayer == mp) {
+                            showVideoError("视频画面已中断，请重试");
+                        }
+                    });
                 }
             });
 
             mp.setOnPreparedListener(mp2 -> {
                 if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
+                clearVideoTimeout();
                 hideLoading();
                 fallbackPlayback.prepared();
-                if (fallbackPlayback.shouldPlay()) mp2.start();
+                try {
+                    if (fallbackPlayback.shouldPlay()) mp2.start();
+                } catch (RuntimeException failure) {
+                    showVideoError(VideoPlaybackFailure.classify(failure).getUserMessage());
+                }
             });
             mp.setOnErrorListener((mp2, what, extra) -> {
                 if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return true;
                 Log.e(TAG, "MediaPlayer error: what=" + what + " extra=" + extra);
-                hideLoading();
-                Toast.makeText(MediaDetailActivity.this,
-                        "视频播放失败", Toast.LENGTH_LONG).show();
-                releasePlayers();
-                isVideoPlaying = false;
-                if (slideshowActive) stopSlideshow();
+                showVideoError(extra == android.media.MediaPlayer.MEDIA_ERROR_IO
+                        ? "读取视频失败，请检查网络或服务器后重试"
+                        : "设备无法播放此视频，可重试或切换其他媒体");
                 return true;
+            });
+            mp.setOnInfoListener((mp2, what, extra) -> {
+                if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return true;
+                if (what == android.media.MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    armVideoTimeout(generation);
+                    showLoading();
+                } else if (what == android.media.MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    clearVideoTimeout();
+                    hideLoading();
+                }
+                return false;
             });
             mp.setOnCompletionListener(mp2 -> {
                 if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
+                clearVideoTimeout();
                 if (slideshowActive) {
                     switchToNext();
                 }
             });
         } catch (Exception e) {
-            Log.e(TAG, "MediaPlayer init failed", e);
-            releasePlayers();
-            isVideoPlaying = false;
-            if (slideshowActive) stopSlideshow();
-            hideLoading();
-            Toast.makeText(MediaDetailActivity.this,
-                    "视频播放失败", Toast.LENGTH_LONG).show();
+            Log.w(TAG, "MediaPlayer initialization failed", e);
+            showVideoError(VideoPlaybackFailure.classify(e).getUserMessage());
+        }
+    }
+
+    private void clearVideoTimeout() {
+        if (playbackTimeout != null) playbackHandler.removeCallbacks(playbackTimeout);
+        playbackTimeout = null;
+    }
+
+    private void armVideoTimeout(final long generation) {
+        clearVideoTimeout();
+        playbackTimeout = () -> {
+            if (loadState.isCurrent(generation) && isVideoPlaying) {
+                showVideoError("视频加载超时，请检查网络后重试");
+            }
+        };
+        playbackHandler.postDelayed(playbackTimeout, VIDEO_WAIT_TIMEOUT_MS);
+    }
+
+    private void showVideoError(String message) {
+        // Invalidate both player generations before releasing their pending network work.
+        loadState.next();
+        navigationState.next();
+        clearImageRequests();
+        releasePlayers();
+        isVideoPlaying = false;
+        if (slideshowActive) stopSlideshow();
+        hideInfoOverlay();
+        videoErrorMessage = message;
+        container.removeAllViews();
+        hideLoading();
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(40, 32, 40, 32);
+        panel.setBackgroundColor(0xEE202020);
+        TextView explanation = new TextView(this);
+        explanation.setText("视频播放失败\n\n" + message + "\n\n确定：重试  ·  左右：切换媒体  ·  返回：退出");
+        explanation.setTextColor(Color.WHITE);
+        explanation.setTextSize(20);
+        explanation.setGravity(Gravity.CENTER);
+        panel.addView(explanation);
+        Button retry = new Button(this);
+        retry.setText("重试");
+        retry.setFocusable(true);
+        retry.setOnClickListener(v -> retryVideo());
+        LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        retryParams.topMargin = 24;
+        panel.addView(retry, retryParams);
+        container.addView(panel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        retry.requestFocus();
+        Log.i(TAG, "Video error displayed; awaiting explicit retry");
+    }
+
+    private void retryVideo() {
+        if (videoErrorMessage != null && currentVideoItem != null) {
+            startVideoPlayback(currentVideoItem);
         }
     }
 
@@ -844,6 +944,28 @@ public class MediaDetailActivity extends FragmentActivity {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (videoErrorMessage != null) {
+            switch (keyCode) {
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                case KeyEvent.KEYCODE_MEDIA_PLAY:
+                case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                    if (event.getRepeatCount() == 0) retryVideo();
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    switchToPrevious();
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    switchToNext();
+                    return true;
+                case KeyEvent.KEYCODE_BACK:
+                    finish();
+                    return true;
+                default:
+                    return true;
+            }
+        }
         if (infoVisible) {
             if (keyCode == KeyEvent.KEYCODE_INFO || keyCode == KeyEvent.KEYCODE_BACK) {
                 hideInfoOverlay();
@@ -958,6 +1080,7 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     @Override protected void onSaveInstanceState(Bundle outState) {
+        if (videoErrorMessage != null) outState.putString("VIDEO_ERROR_MESSAGE", videoErrorMessage);
         outState.putInt("DETAIL_INDEX", currentIndex);
         if (sessionStore != null && mediaList != null && !mediaList.isEmpty()) {
             try {
@@ -980,7 +1103,12 @@ public class MediaDetailActivity extends FragmentActivity {
         super.onStart();
         if (reloadOnStart && mediaList != null && !mediaList.isEmpty()) {
             reloadOnStart = false;
-            showCurrentMedia();
+            if (videoErrorMessage != null && "video".equals(mediaList.get(currentIndex).getType())) {
+                currentVideoItem = mediaList.get(currentIndex);
+                showVideoError(videoErrorMessage);
+            } else {
+                showCurrentMedia();
+            }
         }
     }
 
@@ -993,6 +1121,7 @@ public class MediaDetailActivity extends FragmentActivity {
         navigationState.next();
         clearImageRequests();
         releasePlayers();
+        playbackHandler.removeCallbacksAndMessages(null);
         slideshowActive = false;
         slideshowHandler.removeCallbacksAndMessages(null);
         debounceHandler.removeCallbacksAndMessages(null);
@@ -1009,6 +1138,7 @@ public class MediaDetailActivity extends FragmentActivity {
         if (isFinishing() && sessionStore != null) sessionStore.delete(sessionId);
         clearImageRequests();
         releasePlayers();
+        playbackHandler.removeCallbacksAndMessages(null);
         slideshowHandler.removeCallbacksAndMessages(null);
         debounceHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
