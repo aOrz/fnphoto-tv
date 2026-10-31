@@ -28,7 +28,7 @@
 - `MediaDetailActivity.dispatchKeyEvent` 在子 View 之前统一分发；禁用 ExoPlayer 自带控制器，避免原生控制器、Activity 和焦点三个入口互抢按键。操作栏方向键继续交给 Android 的焦点分发。
 - `VideoRemoteInput` 管理按键所有权、重复节流和跨媒体序列；`VideoSeekState` 处理边界及平台播放器异步定位队列；`VideoControls` 只负责视频详情操作栏。未改全局网格、搜索、文件夹或登录焦点布局。
 - 基于 main `97c370db`，保留焦点、中文 README、照片墙自适应布局与开发指引；复用其 `bg_pill_button` 焦点样式。以后若改详情页按键入口、播放器视图或该按钮背景，需要一起检查交互；不应再次为视频左右键增加媒体导航。
-- 没有更换 ExoPlayer 2.11.8、最低 Android API 或媒体传输/鉴权逻辑。具体电视的按键映射、重复频率、解码与备用播放器可定位能力仍取决于设备，模拟器通过不代表所有电视兼容。
+- 遥控改动本身没有更换播放器版本、最低 Android API 或媒体传输/鉴权逻辑。当前构建已迁移至 Google Maven 的 ExoPlayer 2.13.3，见[来源与兼容边界](development/workflow.md#exoplayer-来源与兼容边界)。具体电视的按键映射、重复频率、解码与备用播放器可定位能力仍取决于设备，模拟器通过不代表所有电视兼容。
 
 ## 自动检查与模拟器场景
 

@@ -11,7 +11,7 @@
 | Gradle / Android Gradle Plugin | wrapper 7.4 / AGP 4.2.2 |
 | 构建 JDK / Java 源码 | JDK 11 / Java 8 |
 | Android SDK | compile/target 29，min 19，Build Tools 30.0.3 |
-| 主要固定依赖 | OkHttp 3.12.12、Retrofit 2.6.4、Leanback 1.0.0、Glide 4.12.0、ExoPlayer 2.11.8、Conscrypt 2.5.2 |
+| 主要固定依赖 | OkHttp 3.12.12、Retrofit 2.6.4、Leanback 1.0.0、Glide 4.12.0、ExoPlayer 2.13.3、Conscrypt 2.5.2 |
 
 依据为 [根 build.gradle](../../build.gradle)、[app/build.gradle](../../app/build.gradle)、
 [wrapper properties](../../gradle/wrapper/gradle-wrapper.properties)。先安装 SDK 包
@@ -30,9 +30,9 @@ bash ./gradlew --no-daemon --stacktrace :app:lintDebug
 
 wrapper 无 Git 执行位，因此用 `bash ./gradlew`，不需要全局安装 Gradle。
 默认检查 debug；release 签名涉及本地 keystore，不是通用验证前提。
-依赖通过 Google/Maven Central 下载，仅 `com.google.android.exoplayer` 使用
-`https://maven.aliyun.com/repository/public` 的 HTTPS 归档镜像。
-受限网络缺少此主机时记录依赖下载受阻，不通过 HTTP、关闭校验或任意升级依赖绕过。
+依赖仅通过 Google Maven/Maven Central 的 HTTPS 官方来源下载，ExoPlayer 2.13.3
+由 Google Maven 提供，不再请求 Aliyun/JCenter 归档源。受限网络需允许官方仓库、
+Gradle 分发及 SDK 下载所需主机；遇到策略拒绝应记录目标，不改网络规则或关闭证书校验。
 
 产物：
 
@@ -42,6 +42,30 @@ wrapper 无 Git 执行位，因此用 `bash ./gradlew`，不需要全局安装 G
 
 CI 运行上述三项及下方 Python discovery；没有模拟器/instrumentation/真实 NAS 步骤。
 本地缺少 JDK/SDK 或网络依赖时，报告原因和未运行检查，不能沿用历史 APK 的通过记录。
+
+### ExoPlayer 来源与兼容边界
+
+旧 2.11.8 发布于 JCenter，Google Maven/Maven Central 不提供该版本；原 Aliyun
+归档镜像在受限云端会返回网络策略 403。
+[官方 2.13.3 发布说明](https://github.com/google/ExoPlayer/releases/tag/r2.13.3)
+明确从本版转到 Google Maven；[官方元数据](https://dl.google.com/dl/android/maven2/com/google/android/exoplayer/exoplayer/maven-metadata.xml)
+与 [POM](https://dl.google.com/dl/android/maven2/com/google/android/exoplayer/exoplayer/2.13.3/exoplayer-2.13.3.pom)
+可核对版本和依赖。固定为最接近的官方可用版本，继续使用 aggregate 依赖，保留原有
+播放模块；新版还会传递引入未在本应用调用的 transformer 模块及拆分后的 common/extractor。
+
+这是播放器版本升级，不是同一二进制换下载地址。上游 2.13.3 的
+[minSdk 仍为 16](https://github.com/google/ExoPlayer/blob/r2.13.3/constants.gradle)，
+应用仍保留 Java 8、minSdk 19、compile/target 29、原 AGP/Gradle 和 OkHttp 约束。
+本次未引入 AndroidX Media3。2.12/2.13 含播放器实现和默认行为修复，真实设备的解码、
+定位时序与格式兼容性必须以新 APK 验证，不能沿用 2.11.8 的设备结论。
+
+适配点：普通视频数据源采用 `DefaultHttpDataSource.Factory`，仍在每次 open 时生成
+认证头；HTTP 失败策略覆盖 2.13.3 实际调用的 `getRetryDelayMsFor(LoadErrorInfo)`，
+HTTP 状态失败仍不自动重试；交付到应用的内存不足异常通过 cause 链识别，不依赖已移除的
+异常类型常量。上游 2.13.3 播放线程不再捕获直接抛出的 `OutOfMemoryError`（加载器仍包装
+此异常），因此不能保证所有内存耗尽都会进入应用错误界面。
+共享视频的受保护传输、受限平台 fallback 和 DPAD 控制保持原有路径。
+单测需直接调用新版失败回调；设备验证仍按下方流程覆盖视频帧推进、暂停/定位、切换及重试。
 
 ## Python 合同与合成媒体检查
 

@@ -43,9 +43,10 @@ part of this workflow.
 - The Gradle wrapper JAR is validated by `setup-gradle`; the distribution is
   downloaded from the official Gradle service with its published SHA-256 checksum.
 - Gradle plugins and dependencies resolve through Google's HTTPS Maven repository
-  and Maven Central. The legacy ExoPlayer 2.11.8 artifacts are absent from those
-  repositories, so only `com.google.android.exoplayer` uses the existing Aliyun
-  archive mirror over HTTPS. No HTTP mirrors or local Maven repository are used.
+  and Maven Central. ExoPlayer is pinned to 2.13.3, the first release published to
+  Google Maven, which retains API 19 support (upstream minSdk 16). No archive
+  mirrors or local Maven repository are used. See the
+  [compatibility notes](../docs/development/workflow.md#exoplayer-来源与兼容边界).
 - Only `main` writes the shared Gradle cache; other refs restore read-only.
 - Runs have a 30-minute timeout and newer runs cancel superseded ones on the same
   branch or PR.
