@@ -95,6 +95,7 @@ public class LoginActivity extends FragmentActivity {
             clearFocus();
             performLogin();
         });
+        editUrl.requestFocus();
     }
 
     private void clearFocus() {

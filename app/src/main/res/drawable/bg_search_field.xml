@@ -6,8 +6,8 @@
             <solid android:color="#1A1C22" />
             <corners android:radius="999dp" />
             <stroke
-                android:width="2dp"
-                android:color="@color/immich_primary" />
+                android:width="3dp"
+                android:color="@color/focus_ring" />
         </shape>
     </item>
 

@@ -141,12 +141,15 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvLoading.setText("加载中...");
         tvLoading.setTextColor(Color.parseColor("#A8AFBF"));
         tvLoading.setTextSize(14);
+        tvLoading.setBackgroundResource(R.drawable.bg_menu_item);
         tvLoading.setPadding(dp(64), dp(14), dp(64), dp(6));
         tvLoading.setOnClickListener(v -> {
             if (foldersFailed) loadSubFolders();
             if (pages.isWindowFull()) startNextWindow();
             else loadMediaFiles(true);
         });
+        tvLoading.setFocusable(false);
+        tvLoading.setClickable(false);
         rootLayout.addView(tvLoading);
 
         // 内容区域
@@ -216,6 +219,34 @@ public class FolderBrowseActivity extends FragmentActivity {
 
         rootLayout.addView(layoutContent);
         setContentView(rootLayout);
+        // Results arrive asynchronously. Wait for real children, and never move
+        // an existing card/retry focus when another page is appended.
+        rootLayout.getViewTreeObserver().addOnGlobalLayoutListener(this::focusContentIfNeeded);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) focusContentIfNeeded();
+    }
+
+    private void focusContentIfNeeded() {
+        if (destroyed || isFinishing() || !hasWindowFocus()) return;
+        View focused = getCurrentFocus();
+        if (focused != null && focused != rvFolders && focused != rvPhotos
+                && focused.isShown() && focused.isEnabled()) return;
+        if (focusFirstChild(rvFolders) || focusFirstChild(rvPhotos)) return;
+        if (tvLoading != null && tvLoading.isShown() && tvLoading.isFocusable()) {
+            tvLoading.requestFocus();
+        }
+    }
+
+    private boolean focusFirstChild(RecyclerView grid) {
+        if (grid == null || !grid.isShown()) return false;
+        for (int i = 0; i < grid.getChildCount(); i++) {
+            if (grid.getChildAt(i).requestFocus()) return true;
+        }
+        return false;
     }
 
     private int dp(int value) {
@@ -512,13 +543,6 @@ public class FolderBrowseActivity extends FragmentActivity {
                     }
                 });
 
-                itemView.setOnFocusChangeListener((v, hasFocus) -> {
-                    if (hasFocus) {
-                        v.setBackgroundResource(R.drawable.bg_menu_item);
-                    } else {
-                        v.setBackgroundResource(0);
-                    }
-                });
             }
 
             void bind(FnHttpApi.SubFolderItem folder) {
@@ -576,13 +600,6 @@ public class FolderBrowseActivity extends FragmentActivity {
                     }
                 });
 
-                itemView.setOnFocusChangeListener((v, hasFocus) -> {
-                    if (hasFocus) {
-                        v.setBackgroundResource(R.drawable.bg_menu_item);
-                    } else {
-                        v.setBackgroundResource(0);
-                    }
-                });
             }
 
             void bind(FnHttpApi.FolderMediaItem item) {
