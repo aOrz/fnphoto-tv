@@ -28,7 +28,6 @@ import com.fnphoto.tv.cache.ImageRequestScope;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class CardPresenter extends Presenter {
     private static final String TAG = "CardPresenter";
@@ -314,7 +313,8 @@ public class CardPresenter extends Presenter {
         
         int count = Math.min(urls.size(), MAX_PREVIEW);
         Bitmap[] bitmaps = new Bitmap[count];
-        AtomicInteger loadedCount = new AtomicInteger(0);
+        // A recycled card must not keep the previous date while its first image loads.
+        cardView.setMainImage(createPlaceholderDrawable(context), false);
         
         Log.d(TAG, "Loading " + count + " preview images with cache support");
         
@@ -331,35 +331,20 @@ public class CardPresenter extends Presenter {
                     new CachedImageLoader.ImageLoadCallback() {
                         @Override
                         public void onBitmapLoaded(Bitmap bitmap) {
-                            if (!images.isCurrent(generation)) return;
+                            if (!images.isCurrent(generation)
+                                    || !itemId.equals(cardView.getTag(R.id.media_item_id))) return;
                             bitmaps[index] = bitmap;
-                            int current = loadedCount.incrementAndGet();
-                            Log.d(TAG, "Preview loaded " + current + "/" + count + " for " + itemId);
-                            
-                            if (current >= count) {
-                                // 所有图片加载完成，检查视图是否可用
-                                String currentId = (String) cardView.getTag(R.id.media_item_id);
-                                if (itemId.equals(currentId)) {
-                                    Bitmap composite = createCompositeBitmap(bitmaps, DATE_CARD_WIDTH, DATE_CARD_HEIGHT);
-                                    cardView.setMainImage(new BitmapDrawable(context.getResources(), composite));
-                                    Log.d(TAG, "Composite image set for " + itemId);
-                                }
-                            }
+                            // Show the first available image immediately, then fill the collage.
+                            // Repeated fades would hide already visible images on every update.
+                            Bitmap composite = createCompositeBitmap(bitmaps, DATE_CARD_WIDTH, DATE_CARD_HEIGHT);
+                            cardView.setMainImage(new BitmapDrawable(context.getResources(), composite), false);
                         }
                         
                         @Override
                         public void onLoadFailed() {
                             if (!images.isCurrent(generation)) return;
-                            int current = loadedCount.incrementAndGet();
-                            Log.w(TAG, "Preview load failed " + current + "/" + count + " for " + itemId);
-                            
-                            if (current >= count) {
-                                String currentId = (String) cardView.getTag(R.id.media_item_id);
-                                if (itemId.equals(currentId)) {
-                                    Bitmap composite = createCompositeBitmap(bitmaps, DATE_CARD_WIDTH, DATE_CARD_HEIGHT);
-                                    cardView.setMainImage(new BitmapDrawable(context.getResources(), composite));
-                                }
-                            }
+                            // Keep any successful images, or the placeholder if every load fails.
+                            Log.w(TAG, "Preview load failed for " + itemId);
                         }
                         @Override
                         public void onLoadCleared() {
