@@ -11,11 +11,15 @@ public class MediaListHolder {
     public interface PageSource {
         boolean hasMore();
         void loadMore(PageCallback callback);
+        /** A window/protocol boundary must not be presented as the end of the library. */
+        default String getBoundaryMessage() { return null; }
     }
 
     public interface PageCallback {
         void onLoaded(List<MediaItem> items, boolean hasMore);
         void onFailure();
+        /** A finite scan found no match yet; the user may explicitly continue. */
+        default void onPaused(String message) { onFailure(); }
     }
 
     public static void set(List<MediaItem> list) {

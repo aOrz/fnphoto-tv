@@ -1,5 +1,9 @@
 # Progressive media loading
 
+The sections below describe the original progressive-loading implementation and
+its historical validation. Current bounded-window and sparse-scan behavior is
+documented in [Large-library safety boundaries](large-library-boundaries.md).
+
 ## Behavior
 
 - Album/date/person photo screens render the first 35-item page immediately, then
@@ -8,8 +12,9 @@
   and explicit retry instead of silently presenting a partial list as complete.
 - Paging is single-flight. Offsets count raw server rows, while displayed items
   are deduplicated by media ID. An empty or all-duplicate page stops pagination.
-  A nullable `hasNext` is authoritative when present; otherwise page length is
-  the fallback. Folder responses may also provide a total.
+  A nullable `hasNext` is authoritative when present; otherwise a later empty
+  page ends scanning (a short nonempty page is not proof of the end). Folder
+  responses may also provide a total.
 - Navigation/search generations reject old callbacks and cancel superseded
   calls. Returning to a parent list preserves its loaded prefix and TV focus.
 - Detail navigation and slideshows can request subsequent pages from their
@@ -50,7 +55,7 @@ python3 -m unittest discover -s test -p 'test*.py'
 git diff --check
 ```
 
-The 2026-10-31 candidate passes **151 JVM tests** (52 new tests) and **13 Python
+The initial 2026-10-31 performance candidate passed **151 JVM tests** (52 new tests) and **13 Python
 mock contract tests**, and produces a debug APK. New JVM tests cover paging
 locks, raw offsets, duplicate/empty/short pages, failure retry, cancellation,
 destroyed/old-query callbacks, buffered final-page delivery, image scopes,
@@ -66,11 +71,12 @@ legacy aliases remain accepted. The manual smoke script is opt-in:
 python3 test/test_mock.py --help
 ```
 
-An additional `:app:lintDebug` run reports 11 existing errors and 91 warnings.
+That initial candidate's additional `:app:lintDebug` run reported 11 existing errors and 91 warnings.
 All 11 error locations already exist on the base `5f10154`: the unused
 `item_date_preview.xml` references missing `PreviewGridView`, and letter-spacing
 calls/style attributes are not all guarded for API 19. This change does not
-disable lint checks or claim that lint passes.
+disable lint checks or claim that lint passed. Those 11 errors were subsequently
+fixed by the functional-completion change; they are not current outstanding errors.
 
 ## Device validation and remaining limits
 
@@ -83,9 +89,11 @@ is open, failed/retried pages, and mixed photo/video slideshows.
 
 The code removes the all-pages-before-first-render dependency; no measured
 latency or FPS improvement is claimed. Real NAS pagination/signature behavior,
-TV focus and hardware decoder behavior still need device validation. Metadata
-already visited remains in memory (not a bounded moving window); geographic
-search retains its existing non-paged backend contract. Original photos may
+hardware decoder behavior still need representative device validation. The later
+large-library change replaces indefinite metadata retention with explicit bounded
+windows and warns about location completeness; geographic search still retains
+its existing non-paged backend contract. Original photos may
 still require transferring original bytes even when Glide downsamples decoding.
-The API-19 lint issues above and process-death restoration of the in-memory
-detail handoff are separate follow-up work.
+The functional-completion change also added process-death restoration of the
+loaded detail window; resuming its original live pagination after process death
+still requires returning to the list.

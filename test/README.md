@@ -19,6 +19,12 @@ python -m pip install -r test/requirements-contract.txt
 
 ## 2. 大数据分页场景
 
+新增边界专项：`python test/large_library_server.py --profile sparse-video --count 200`
+可验证前 175 条无匹配后暂停、显式继续才找到视频；`--count 2400` 可验证
+1,200 条窗口替换。地点完整性、响应限额及一次失败/延迟场景见
+[边界合同与 fixture](../docs/large-library-api-contract.md)。这些仍是合成测试，
+不证明真实 NAS 支持新的分页参数。
+
 ```bash
 python test/qa_server.py --profile large --host 127.0.0.1 --port 5666
 ```

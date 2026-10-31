@@ -49,6 +49,9 @@ RSA_PUBLIC_PEM = RSA_KEY.public_key().public_bytes(
 LOGIN_SI = "545460846793"
 TOKEN_CACHE = {}
 HEARTBEAT_CLIENTS = set()
+# Synthetic-only location-response scenarios, never request parameters sent to a NAS.
+GEO_RESPONSE_LIMIT = None
+GEO_REPORT_PAGING = True
 
 
 def get_local_ip() -> str:
@@ -547,9 +550,30 @@ async def handle_search(request):
 
 async def handle_search_results(request):
     body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("keyword", ""), str):
+        raise web.HTTPBadRequest(text="Expected synthetic search object/string keyword")
     keyword = body.get("keyword", "")
-    matched = [p for p in PHOTOS if keyword.lower() in p["fileName"].lower()] if keyword else PHOTOS[:20]
-    return ok_v2({"list": matched, "count": len(matched), "hasNext": False, "total": len(matched)})
+    filters = body.get("filters", [])
+    if not isinstance(filters, list) or body.get("antiFilters", []) != []:
+        raise web.HTTPBadRequest(text="Unsupported synthetic search filters")
+    matched = [p for p in PHOTOS if keyword.lower() in p["fileName"].lower()]
+    for location in filters:
+        if not isinstance(location, dict) or location.get("filterName") != "photo_location":
+            raise web.HTTPBadRequest(text="Only the existing photo_location shape is modeled")
+        country, children = location.get("filterValue"), location.get("subFilters")
+        if not isinstance(country, str) or not isinstance(children, list) or len(children) != 1:
+            raise web.HTTPBadRequest(text="Expected one synthetic city filter")
+        child = children[0]
+        if not isinstance(child, dict) or child.get("filterName") != country or not isinstance(child.get("filterValue"), str):
+            raise web.HTTPBadRequest(text="Malformed synthetic city filter")
+        city = child["filterValue"]
+        matched = [p for p in matched if p.get("geo", "") == city + ", " + country]
+    total = len(matched)
+    selected = matched if GEO_RESPONSE_LIMIT is None else matched[:GEO_RESPONSE_LIMIT]
+    result = {"list": selected, "count": len(selected)}
+    if GEO_REPORT_PAGING:
+        result.update(hasNext=len(selected) < total, total=total)
+    return ok_v2(result)
 
 
 async def handle_upload_path(request):

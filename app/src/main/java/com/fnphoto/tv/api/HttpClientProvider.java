@@ -15,6 +15,7 @@ public class HttpClientProvider {
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
+                .addInterceptor(new MetadataResponseInterceptor())
                 .addInterceptor(new ApiInterceptor(context))
                 .build();
         }

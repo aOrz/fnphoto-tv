@@ -8,6 +8,7 @@ import java.io.FileWriter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import com.fnphoto.tv.paging.MetadataLimits;
 import static org.junit.Assert.*;
 
 public class DetailSessionStoreTest {
@@ -18,14 +19,54 @@ public class DetailSessionStoreTest {
         DetailSessionStore store = new DetailSessionStore(root);
         String id = store.newId();
         List<MediaItem> items = new ArrayList<>();
-        for (int i = 0; i < 5000; i++) items.add(new MediaItem("" + i, "photo", "photo", "thumb", "original"));
+        for (int i = 0; i < MetadataLimits.MAX_ITEMS; i++) items.add(new MediaItem("" + i, "photo", "photo", "thumb", "original"));
         store.save(id, "owner", items, true);
         DetailSessionStore.Snapshot loaded = new DetailSessionStore(root).read(id, "owner");
         assertNotNull(loaded);
-        assertEquals(5000, loaded.items.size());
-        assertEquals("4999", loaded.items.get(4999).getId());
+        assertEquals(MetadataLimits.MAX_ITEMS, loaded.items.size());
+        assertEquals("1199", loaded.items.get(1199).getId());
         assertTrue(loaded.hadMore);
         assertEquals(36, id.length());
+    }
+
+    @Test public void oversizedWindowIsRejectedRatherThanSilentlyTruncated() throws Exception {
+        DetailSessionStore store = new DetailSessionStore(temporary.newFolder());
+        List<MediaItem> items = Collections.nCopies(MetadataLimits.MAX_ITEMS + 1,
+                new MediaItem("1", "photo", "photo", "t", "m"));
+        try { store.save(store.newId(), "owner", items, true); fail("must reject oversized snapshot"); }
+        catch (java.io.IOException expected) { }
+    }
+
+    @Test public void snapshotCountAndBytesAreBoundedAndFailedWriteLeavesNoTemp() throws Exception {
+        File root = temporary.newFolder();
+        DetailSessionStore store = new DetailSessionStore(root);
+        List<MediaItem> items = Collections.singletonList(new MediaItem("1", "photo", "photo", "t", "m"));
+        for (int i = 0; i < 20; i++) store.save(store.newId(), "owner", items, false);
+        File directory = new File(root, "detail_sessions");
+        assertTrue(directory.listFiles().length <= DetailSessionStore.MAX_SESSIONS);
+        char[] chars = new char[10000];
+        java.util.Arrays.fill(chars, 'x');
+        List<MediaItem> huge = Collections.nCopies(MetadataLimits.MAX_ITEMS,
+                new MediaItem("1", new String(chars), "photo", "t", "m"));
+        try { store.save(store.newId(), "owner", huge, false); fail("must bound serialized bytes"); }
+        catch (java.io.IOException expected) { }
+        for (File file : directory.listFiles()) {
+            assertFalse(file.getName().endsWith(".tmp"));
+            assertTrue(file.length() <= MetadataLimits.MAX_METADATA_RESPONSE_BYTES);
+        }
+    }
+
+    @Test public void oversizedLegacySnapshotIsRejectedBeforeParsing() throws Exception {
+        File root = temporary.newFolder();
+        DetailSessionStore store = new DetailSessionStore(root);
+        String id = store.newId();
+        File file = new File(new File(root, "detail_sessions"), id + ".json");
+        try (java.io.RandomAccessFile out = new java.io.RandomAccessFile(file, "rw")) {
+            out.setLength(MetadataLimits.MAX_METADATA_RESPONSE_BYTES + 1);
+        }
+        assertNull(store.read(id, "owner"));
+        new DetailSessionStore(root);
+        assertFalse(file.exists());
     }
 
     @Test public void otherLoginCannotRestoreAndExplicitFinishDeletesSnapshot() throws Exception {
