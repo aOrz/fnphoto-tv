@@ -80,7 +80,36 @@ adb -s emulator-5554 shell am instrument -w \
 独立验证使用官方 ExoPlayer `r2.11.8` 源码
 `e822196336b64208ba7caa557e4c6ee02b03335e` 编译同版本模块，通过临时 Gradle init
 脚本替换验证环境中的依赖；仓库的产品依赖与仓库地址没有更改。该结果应与原配置
-能否直接联网构建区分。详细执行结果另见本次交付验证记录。
+能否直接联网构建区分。
+
+### 本次云端执行结果（2026-10-31）
+
+产品代码提交：`2390bfe`；main 在最终核对时仍为
+`4e38a953fdb54ea7ec7e15470c218f4c02182180`。
+
+| 检查 | 结果 |
+| --- | --- |
+| JVM 单元测试 | **PASS**：310 项，31 suites，0 失败、0 错误、0 跳过；包含新增 16 项 |
+| Python fixture / 合同测试 | **PASS**：69 项，0 失败 |
+| Android lint | **PASS**：0 Error/Fatal；仍有 90 项 Warning |
+| Debug APK / AndroidTest APK | **PASS**：使用上述官方同版本源码验证配置成功生成 |
+| 原仓库 Maven 配置构建 | **BLOCKED**：现有 ExoPlayer 镜像网络 403，没有修改产品仓库地址 |
+| 3 项 Android 设备测试 | **NOT RUN**：已编译打包，ADB AUTH 后无法建立连接 |
+| 图片墙实测截图 | **NOT RUN**：只有系统开机/黑屏画面，不是应用验证证据 |
+
+实际尝试官方 API29 Android TV x86 镜像，软件模拟运行（环境没有 `/dev/kvm`），
+日志确认 `Boot completed`。宿主 HOME 为只读，标准 ADB/console 状态文件无法
+创建；通过仅监听 loopback、带令牌的官方 gRPC 通道确认系统画面后，仍未得到
+可用 ADB 授权连接，系统停留黑屏。因此没有把“模拟器启动”或“测试 APK 编译成功”
+计为设备测试通过，也没有确认不同分辨率、字体缩放、焦点动画或长文本的实际画面。
+没有待审批操作；需在可正常连接的 TV 模拟器或实机上完成上述设备矩阵。
+
+本次工作区证据（不提交生成产物）：
+
+- `/workspace/tooling/android-validation-result.json`：构建来源、包 hash 和设备状态。
+- `/workspace/tooling/gradle-2390bfe-validation.log`：最后产品候选的四项 Gradle 任务。
+- `/workspace/tooling/python-contract-tests.log`：69 项 Python 检查。
+- `app/build/reports/tests/testDebugUnitTest/index.html` 与 `app/build/reports/lint-results-debug.html`。
 
 ## 仍有的边界
 
