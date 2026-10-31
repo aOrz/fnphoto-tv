@@ -33,8 +33,10 @@ are not part of this workflow.
 - Actions are pinned to full commit SHAs. Update pins deliberately when upgrading.
 - The Gradle wrapper JAR is validated by `setup-gradle`; the distribution is
   downloaded from the official Gradle service with its published SHA-256 checksum.
-- Gradle dependencies resolve through Google's HTTPS Maven repository and Maven
-  Central, not HTTP mirrors or a developer's local Maven repository.
+- Gradle plugins and dependencies resolve through Google's HTTPS Maven repository
+  and Maven Central. The legacy ExoPlayer 2.11.8 artifacts are absent from those
+  repositories, so only `com.google.android.exoplayer` uses the existing Aliyun
+  archive mirror over HTTPS. No HTTP mirrors or local Maven repository are used.
 - Only `main` writes the shared Gradle cache; other refs restore read-only.
 - Runs have a 30-minute timeout and newer runs cancel superseded ones on the same
   branch or PR.
