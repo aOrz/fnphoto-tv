@@ -55,14 +55,19 @@
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
 | 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget` 及同名 Test |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |
-| 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPlaybackState`、`DetailSessionStore`；`MediaDetailLifecycleTest`、`player/*Test` |
+| 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPreloadScope`、`DetailPlaybackState`、`DetailSessionStore`；`MediaDetailLifecycleTest`、`DetailPreloadScopeTest`、`player/*Test` |
 | 图片生命周期 | `cache/CachedImageLoader`、`ImageRequestScope`、`ImageCacheManager`；`ImagePipelineTest` |
+| 日期预览调度 | `PreviewLoadThrottle`、`MainFragment.schedulePreviewLoad`、`CardPresenter.loadPreviewImages`；`PreviewLoadThrottleTest`，设备场景见 QA 清单 A11–A14 |
 | 共享 | `SharedAlbumSupport`、`player/SharedVideoStream`；`SharedAlbumSupportTest`、`test_shared_fixtures.py` |
 | 网络/鉴权 | `api/FnHttpApi`、`ApiInterceptor`、`FnWebSocketClient`、`RequestAuthentication`、`TokenRefreshGate`；`api/*Test` |
 | 地点/响应上限 | `GeoPhotoResponseReader`、`MetadataResponseInterceptor` 及同名 Test；`test_large_library_contract.py` |
 
 Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要仅凭测试类名推断覆盖层级，
 例如 `MediaDetailLifecycleTest` 验证状态辅助类，不启动真实 Activity。
+
+日期预览持续滚动时按最新焦点节流派发，拼图逐张显示；详情的缩略图可见状态与主图完成
+分开，预取成为当前图时保留到主图请求结束。实现边界见
+[图片、缓存与视频](constraints.md#图片缓存与视频)，行为说明见 [加载说明](../performance.md)。
 
 ## 已有文档的用途与冲突处理
 

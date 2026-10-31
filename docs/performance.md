@@ -1,7 +1,7 @@
 # Progressive media loading
 
-The sections below describe the original progressive-loading implementation and
-its historical validation. Current bounded-window and sparse-scan behavior is
+The sections below describe the current progressive-loading behavior and
+its historical validation. Bounded-window and sparse-scan behavior is
 documented in [Large-library safety boundaries](large-library-boundaries.md).
 
 ## Behavior
@@ -22,6 +22,10 @@ documented in [Large-library safety boundaries](large-library-boundaries.md).
   finished prefetching after the detail screen copied its initial list.
 - Date previews use a +/-6-day window, at most two metadata requests in flight,
   small thumbnails, and a 512-date URL LRU. Failed preview requests can retry.
+  Selection updates use a leading/trailing 300ms throttle: the first selection
+  can load immediately and continued navigation keeps the latest selection
+  queued without repeatedly postponing it. Completed metadata requests can
+  still fill an available slot for the latest selection.
 
 ## Images and playback
 
@@ -32,9 +36,19 @@ documented in [Large-library safety boundaries](large-library-boundaries.md).
   have explicit cancellation scopes and clear Glide-owned bitmap references.
   Full-photo and thumbnail requests are one Glide chain, so a slow thumbnail
   cannot overwrite the full image.
+- Date mosaics display the first successful thumbnail immediately and update as
+  the remaining thumbnails arrive. A slow or failed thumbnail does not hold back
+  already available images; recycled cards still reject old callbacks.
+- In photo detail, a visible thumbnail dismisses the loading indicator while
+  the full image continues loading. Slideshow timing still waits for the full
+  request to finish, rather than starting when the thumbnail appears.
 - Detail views cancel old targets on navigation/stop/destroy and preload only
   one adjacent **photo**, at low priority and no larger than 1920x1080. They never
   submit a video stream URL to an image decoder.
+  When that preloaded photo becomes current, its preload handle is retained
+  until the displayed full-image request completes or fails. This also covers
+  a newly created ImageView waiting for measurement. At most the current
+  handoff and one next-photo preload are retained; leaving detail clears both.
 - Video preview uses a small overlay view, not another full-screen bitmap.
   Both ExoPlayer and its MediaPlayer fallback are released; fallback transport
   keys wait for preparation. A stopped slideshow cannot advance because an old

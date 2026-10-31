@@ -45,7 +45,7 @@ public class MainFragment extends BrowseSupportFragment {
     private BrowseMode rootBrowseMode = BrowseMode.GALLERY;
     private boolean rootBrowseLoaded;
     private static final int SHARED_DETAIL_REQUEST = 210;
-    private static final int PREVIEW_LOAD_DELAY = 300; // 延迟加载时间
+    private static final int PREVIEW_LOAD_INTERVAL = 300;
     private static final int VISIBLE_RANGE_BUFFER = 6; // 可视范围前后的缓冲数量
 
     private static final int PAGE_SIZE = 60;
@@ -112,6 +112,7 @@ public class MainFragment extends BrowseSupportFragment {
     private List<FnHttpApi.TimelineItem> allTimelineItems = new ArrayList<>();
     private Set<Integer> loadedIndexes = new HashSet<>();
     private Handler lazyLoadHandler = new Handler(Looper.getMainLooper());
+    private final PreviewLoadThrottle previewLoadThrottle = new PreviewLoadThrottle(PREVIEW_LOAD_INTERVAL);
     private Handler positionHandler = new Handler(Looper.getMainLooper()); // 专门用于位置恢复
     private int lastVisibleIndex = -1;
     
@@ -273,6 +274,7 @@ public class MainFragment extends BrowseSupportFragment {
         selectedWallItem = null;
         requests.next();
         lazyLoadHandler.removeCallbacksAndMessages(null);
+        previewLoadThrottle.reset();
         positionHandler.removeCallbacksAndMessages(null);
         pendingPreviewIndexes.clear();
         pendingPersonPreviewIndexes.clear();
@@ -532,17 +534,22 @@ public class MainFragment extends BrowseSupportFragment {
     
     private void scheduleLazyLoad(int centerIndex) {
         lastVisibleIndex = centerIndex;
-        
-        // 取消之前的延迟任务
-        lazyLoadHandler.removeCallbacksAndMessages(null);
-        
-        // 延迟加载，避免快速滚动时频繁加载
+        schedulePreviewLoad(centerIndex, 1);
+    }
+
+    private void schedulePreviewLoad(int centerIndex, int screen) {
+        if (previewScreen != screen || isPhotoListView) return;
+        long delay = previewLoadThrottle.request(centerIndex, android.os.SystemClock.uptimeMillis());
+        if (delay < 0) return;
+        final long generation = requests.generation();
+        // Keep the existing deadline while focus moves; continuous scrolling must not starve previews.
         lazyLoadHandler.postDelayed(() -> {
-            if (centerIndex == lastVisibleIndex) {
-                // 用户停止滚动，加载可视范围内的预览
-                loadVisiblePreviews(centerIndex);
-            }
-        }, PREVIEW_LOAD_DELAY);
+            if (!requests.isCurrent(generation) || previewScreen != screen || isPhotoListView) return;
+            int latestIndex = previewLoadThrottle.take(android.os.SystemClock.uptimeMillis());
+            if (latestIndex < 0) return;
+            if (screen == 1) loadVisiblePreviews(latestIndex);
+            else loadVisiblePersonPreviews(latestIndex);
+        }, delay);
     }
     
     private void loadVisiblePreviews(int centerIndex) {
@@ -575,6 +582,8 @@ public class MainFragment extends BrowseSupportFragment {
                     } else {
                         previewRetryAfter.put(index, android.os.SystemClock.uptimeMillis() + 3000);
                     }
+                    // A free metadata slot can serve the latest focus immediately; the throttle
+                    // only bounds selection scans, while pending IDs and the two-slot cap bound work.
                     loadVisiblePreviews(lastVisibleIndex);
                 });
             }
@@ -769,13 +778,13 @@ public class MainFragment extends BrowseSupportFragment {
         }
         
         if (timelineLimited) addUnpagedLimitNotice("日期");
-        // 初始加载前几个可见项的预览
-        if (!allDateItems.isEmpty()) {
-            lazyLoadHandler.postDelayed(() -> loadVisiblePreviews(0), 500);
-        }
-        
-        // 恢复之前保存的位置
         restoreTimelinePosition();
+        // Use the same throttle for initial loading, centered on the position being restored.
+        if (!allDateItems.isEmpty()) {
+            int initialIndex = savedTimelinePosition >= 0 && savedTimelinePosition < allDateItems.size()
+                    ? savedTimelinePosition : 0;
+            scheduleLazyLoad(initialIndex);
+        }
     }
 
     public void loadFolders() {
@@ -1192,12 +1201,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void schedulePersonLazyLoad(int centerIndex) {
         personLastVisibleIdx = centerIndex;
-        lazyLoadHandler.removeCallbacksAndMessages(null);
-        lazyLoadHandler.postDelayed(() -> {
-            if (centerIndex == personLastVisibleIdx) {
-                loadVisiblePersonPreviews(centerIndex);
-            }
-        }, PREVIEW_LOAD_DELAY);
+        schedulePreviewLoad(centerIndex, 2);
     }
 
     private void loadVisiblePersonPreviews(int centerIndex) {
@@ -1229,6 +1233,7 @@ public class MainFragment extends BrowseSupportFragment {
                     } else {
                         personPreviewRetryAfter.put(index, android.os.SystemClock.uptimeMillis() + 3000);
                     }
+                    // Refill a freed slot at the latest focus without delaying the remaining previews.
                     loadVisiblePersonPreviews(personLastVisibleIdx);
                 });
             }
@@ -2133,11 +2138,13 @@ public class MainFragment extends BrowseSupportFragment {
         }
 
         if (personTimelineLimited) addUnpagedLimitNotice("人物日期");
-        // 触发第一个可见区域的预览加载
-        lazyLoadHandler.postDelayed(() -> {
-            loadVisiblePersonPreviews(0);
-        }, 300);
-        restorePreviewPosition(personDateItems, personLastVisibleIdx);
+        int restorePosition = personLastVisibleIdx;
+        restorePreviewPosition(personDateItems, restorePosition);
+        if (!personDateItems.isEmpty()) {
+            int initialIndex = restorePosition >= 0 && restorePosition < personDateItems.size()
+                    ? restorePosition : 0;
+            schedulePersonLazyLoad(initialIndex);
+        }
     }
 
     public void loadPersonPhotosByDate(String dateStr, int itemCount) {

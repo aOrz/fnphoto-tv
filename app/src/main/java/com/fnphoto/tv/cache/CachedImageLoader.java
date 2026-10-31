@@ -37,6 +37,8 @@ public final class CachedImageLoader {
     }
 
     public interface LoadListener {
+        /** A thumbnail is visible; the full image can still be loading. */
+        default void onPreviewLoaded() {}
         void onLoaded();
         void onLoadFailed();
     }
@@ -103,7 +105,19 @@ public final class CachedImageLoader {
         RequestBuilder<Drawable> full = manager.load(url == null || url.isEmpty() ? null
                 : model(view.getContext(), url, token)).fitCenter();
         if (thumbnailUrl != null && !thumbnailUrl.isEmpty() && !thumbnailUrl.equals(url)) {
-            full = full.thumbnail(manager.load(model(view.getContext(), thumbnailUrl, token)).fitCenter());
+            full = full.thumbnail(manager.load(model(view.getContext(), thumbnailUrl, token)).fitCenter()
+                    .listener(new RequestListener<Drawable>() {
+                        @Override public boolean onLoadFailed(@Nullable GlideException e, Object model,
+                                Target<Drawable> target, boolean isFirstResource) {
+                            // A missing preview must not finish or fail the full-image request.
+                            return false;
+                        }
+                        @Override public boolean onResourceReady(Drawable resource, Object model,
+                                Target<Drawable> target, DataSource source, boolean isFirstResource) {
+                            if (listener != null) listener.onPreviewLoaded();
+                            return false;
+                        }
+                    }));
         }
         full.listener(new RequestListener<Drawable>() {
             @Override public boolean onLoadFailed(@Nullable GlideException e, Object model,

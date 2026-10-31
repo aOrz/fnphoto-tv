@@ -71,7 +71,7 @@ public class MediaDetailActivity extends FragmentActivity {
     private final DetailLoadState loadState = new DetailLoadState();
     private final DetailLoadState navigationState = new DetailLoadState();
     private final DetailPlaybackState fallbackPlayback = new DetailPlaybackState();
-    private final List<CachedImageLoader.RequestHandle> preloads = new ArrayList<>();
+    private final DetailPreloadScope preloads = new DetailPreloadScope();
     private MediaPageController pageController;
     private Call<FnHttpApi.PhotoDetailResponse> detailCall;
     private boolean reloadOnStart;
@@ -196,7 +196,7 @@ public class MediaDetailActivity extends FragmentActivity {
 
         loadState.next();
         navigationState.next();
-        clearImageRequests();
+        clearImageRequests("photo".equals(item.getType()) ? photoUrl(item) : null);
         releasePlayers();
         isVideoPlaying = false;
         currentVideoItem = null;
@@ -254,18 +254,23 @@ public class MediaDetailActivity extends FragmentActivity {
     private void showPhoto(MediaItem item) {
         final ImageView target = createMediaImageView();
         final long generation = loadState.next();
-        String url = item.getMediaUrl();
-        if (url == null || url.isEmpty()) url = item.getThumbnailUrl();
+        final String url = photoUrl(item);
         CachedImageLoader.loadPhotoIntoImageView(target, url, item.getThumbnailUrl(), token,
                 new CachedImageLoader.LoadListener() {
+                    @Override public void onPreviewLoaded() {
+                        if (!loadState.isCurrent(generation) || imageView != target) return;
+                        hideLoading();
+                    }
                     @Override public void onLoaded() {
                         if (!loadState.isCurrent(generation) || imageView != target) return;
+                        preloads.complete(url);
                         hideLoading();
                         currentPhotoReady = true;
                         schedulePhotoSlideshow();
                     }
                     @Override public void onLoadFailed() {
                         if (!loadState.isCurrent(generation) || imageView != target) return;
+                        preloads.complete(url);
                         hideLoading();
                         currentPhotoReady = true;
                         schedulePhotoSlideshow();
@@ -276,23 +281,35 @@ public class MediaDetailActivity extends FragmentActivity {
         preloadAdjacentPhotos();
     }
 
+    private String photoUrl(MediaItem item) {
+        String url = item.getMediaUrl();
+        return url == null || url.isEmpty() ? item.getThumbnailUrl() : url;
+    }
+
     private void preloadAdjacentPhotos() {
         // One bounded, lower-priority photo ahead. Never fetch a video as an image.
         if (mediaList == null || currentIndex + 1 >= mediaList.size()) return;
         MediaItem item = mediaList.get(currentIndex + 1);
         if (!DetailLoadState.shouldPreload(item)) return;
+        String url = item.getMediaUrl();
+        if (preloads.contains(url)) return;
         int width = Math.min(1920, getResources().getDisplayMetrics().widthPixels);
         int height = Math.min(1080, getResources().getDisplayMetrics().heightPixels);
-        preloads.add(CachedImageLoader.preloadImage(this, item.getMediaUrl(), token, width, height));
+        CachedImageLoader.RequestHandle handle = CachedImageLoader.preloadImage(this, url, token, width, height);
+        preloads.setNext(url, handle::clear);
     }
 
     private void clearImageRequests() {
+        clearImageRequests(null);
+    }
+
+    private void clearImageRequests(String retainedPhotoUrl) {
+        if (retainedPhotoUrl == null) preloads.clear();
+        else preloads.select(retainedPhotoUrl);
         if (imageView != null) {
             CachedImageLoader.clear(imageView);
             imageView = null;
         }
-        for (CachedImageLoader.RequestHandle handle : preloads) handle.clear();
-        preloads.clear();
         if (detailCall != null) {
             detailCall.cancel();
             detailCall = null;
