@@ -49,6 +49,8 @@ public class CardPresenter extends Presenter {
     private String baseUrl;
     private PhotoWallLayout wallLayout;
 
+    // Change display geometry only. Existing bounded thumbnail/preview decode sizes below
+    // deliberately remain independent of TV resolution and the number of loaded metadata items.
     void setWallLayout(PhotoWallLayout layout) {
         wallLayout = layout;
     }
