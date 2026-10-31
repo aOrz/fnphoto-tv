@@ -22,6 +22,8 @@ Thumbs.db
 # OpenCode
 .opencode/
 AGENTS.md
+# Track the shared repository instructions; keep nested local overrides ignored.
+!/AGENTS.md
 
 # Keystore files (security)
 *.jks
