@@ -9,7 +9,6 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -408,14 +407,9 @@ public class MainActivity extends FragmentActivity {
         if (fragment instanceof MainFragment) ((MainFragment) fragment).cancelPhotoFocusHandoff();
     }
 
-    @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getAction() == KeyEvent.ACTION_DOWN) cancelPendingPhotoFocusHandoff();
-        return super.dispatchKeyEvent(event);
-    }
-
-    @Override public boolean dispatchTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) cancelPendingPhotoFocusHandoff();
-        return super.dispatchTouchEvent(event);
+    @Override public void onUserInteraction() {
+        super.onUserInteraction();
+        cancelPendingPhotoFocusHandoff();
     }
 
     @Override
