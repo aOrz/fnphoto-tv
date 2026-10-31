@@ -43,7 +43,6 @@ import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
 public class SearchActivity extends FragmentActivity {
-    private static final int GRID_SPAN = 6;
     private static final int SEARCH_DELAY = 500;
     private static final int PAGE_LIMIT = 100;
 
@@ -174,7 +173,7 @@ public class SearchActivity extends FragmentActivity {
         rvResults.setLayoutParams(gridLp);
         rvResults.setClipToPadding(false);
         rvResults.setPadding(dp(48), dp(8), dp(48), dp(40));
-        rvResults.setLayoutManager(new GridLayoutManager(this, GRID_SPAN));
+        rvResults.setLayoutManager(new AdaptiveGridLayoutManager(this));
 
         adapter = new SearchAdapter();
         rvResults.setAdapter(adapter);
