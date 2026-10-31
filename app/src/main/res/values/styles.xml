@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.FnPhotoTV" parent="Theme.Leanback">
+    <style name="Base.FnPhotoTV" parent="Theme.Leanback">
         <item name="android:windowBackground">@color/ink</item>
-        <item name="android:colorAccent">@color/immich_primary</item>
         <item name="android:textColorPrimary">@color/text_primary</item>
         <item name="android:textColorSecondary">@color/text_secondary</item>
         <item name="android:windowActionBar">false</item>
@@ -11,10 +10,9 @@
     </style>
 
     <!-- 登录页表单标签 -->
-    <style name="FormLabel">
+    <style name="Base.FormLabel" parent="">
         <item name="android:textSize">12sp</item>
         <item name="android:textColor">@color/text_secondary</item>
-        <item name="android:letterSpacing">0.04</item>
         <item name="android:layout_marginStart">4dp</item>
         <item name="android:layout_marginBottom">6dp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
@@ -35,21 +33,25 @@
     </style>
 
     <!-- 主行动按钮 -->
-    <style name="PrimaryButton">
+    <style name="Base.PrimaryButton" parent="">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">50dp</item>
         <item name="android:background">@drawable/bg_button_primary</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:textSize">16sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
-        <item name="android:letterSpacing">0.02</item>
     </style>
 
-    <style name="SectionTitle">
+    <style name="Base.SectionTitle" parent="">
         <item name="android:textSize">13sp</item>
         <item name="android:textColor">@color/text_tertiary</item>
         <item name="android:fontFamily">sans-serif-medium</item>
-        <item name="android:letterSpacing">0.06</item>
     </style>
+
+    <!-- API 19-compatible public styles. API 21 adds accent and letter spacing. -->
+    <style name="Theme.FnPhotoTV" parent="Base.FnPhotoTV" />
+    <style name="FormLabel" parent="Base.FormLabel" />
+    <style name="PrimaryButton" parent="Base.PrimaryButton" />
+    <style name="SectionTitle" parent="Base.SectionTitle" />
 
 </resources>

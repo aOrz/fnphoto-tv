@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FnPhotoTV" parent="Base.FnPhotoTV">
+        <item name="android:colorAccent">@color/immich_primary</item>
+    </style>
+    <style name="FormLabel" parent="Base.FormLabel">
+        <item name="android:letterSpacing">0.04</item>
+    </style>
+    <style name="PrimaryButton" parent="Base.PrimaryButton">
+        <item name="android:letterSpacing">0.02</item>
+    </style>
+    <style name="SectionTitle" parent="Base.SectionTitle">
+        <item name="android:letterSpacing">0.06</item>
+    </style>
+</resources>

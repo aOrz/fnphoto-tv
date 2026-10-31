@@ -116,7 +116,9 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvTitle.setTextColor(Color.parseColor("#F2F4F8"));
         tvTitle.setTextSize(34);
         tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tvTitle.setLetterSpacing(0.01f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            tvTitle.setLetterSpacing(0.01f);
+        }
         tvTitle.setSingleLine(true);
         tvTitle.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         tvTitle.setPadding(dp(64), dp(40), dp(64), 0);
@@ -146,7 +148,9 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvFoldersTitle.setText("子文件夹");
         tvFoldersTitle.setTextColor(Color.parseColor("#6E7686"));
         tvFoldersTitle.setTextSize(12);
-        tvFoldersTitle.setLetterSpacing(0.14f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            tvFoldersTitle.setLetterSpacing(0.14f);
+        }
         tvFoldersTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         tvFoldersTitle.setPadding(dp(70), dp(24), dp(64), dp(8));
         tvFoldersTitle.setVisibility(View.GONE);
@@ -170,7 +174,9 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvPhotosTitle.setText("照片和视频");
         tvPhotosTitle.setTextColor(Color.parseColor("#6E7686"));
         tvPhotosTitle.setTextSize(12);
-        tvPhotosTitle.setLetterSpacing(0.14f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            tvPhotosTitle.setLetterSpacing(0.14f);
+        }
         tvPhotosTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         tvPhotosTitle.setPadding(dp(70), dp(24), dp(64), dp(8));
         tvPhotosTitle.setVisibility(View.GONE);

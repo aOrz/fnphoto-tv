@@ -485,7 +485,16 @@ async def handle_folder_file_list(request):
 
 
 async def handle_timeline(request):
-    return ok_v2({"list": TIMELINE_ITEMS})
+    if request.query.get("is_collect") != "1":
+        return ok_v2({"list": TIMELINE_ITEMS})
+    counts = {}
+    for photo in PHOTOS:
+        if photo.get("isCollect") == 1:
+            dt = parse_photo_time(photo.get("photoDateTime") or photo["dateTime"])
+            key = (dt.year, dt.month, dt.day)
+            counts[key] = counts.get(key, 0) + 1
+    return ok_v2({"list": [{"year": y, "month": m, "day": d, "itemCount": count}
+                          for (y, m, d), count in sorted(counts.items(), reverse=True)]})
 
 
 async def handle_gallery_list(request):
@@ -503,8 +512,26 @@ async def handle_photo_detail(request):
 
 
 async def handle_toggle_collect(request):
-    body = await request.json() if request.can_read_body else {}
-    return ok_v2({"isCollect": body.get("type", 1)})
+    # Match FnHttpApi.toggleCollect's application/x-www-form-urlencoded contract.
+    # JSON id/collect is also accepted for diagnostic clients, never a guessed type field.
+    try:
+        body = await request.json() if request.content_type == "application/json" else await request.post()
+        photo_id = int(body["id"])
+        collected = int(body["collect"])
+        if collected not in (0, 1):
+            raise ValueError("collect must be 0 or 1")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        raise web.HTTPBadRequest(text="Expected id and collect=0 or collect=1")
+    photo = PHOTO_MAP.get(photo_id)
+    if photo is None:
+        return web.json_response({"errno": 404, "result": "fail"}, status=404)
+    # Deliberately idempotent, like an assignment endpoint: pressing twice must not
+    # depend on the server returning an error to mean 'already collected'.
+    photo["isCollect"] = collected
+    for item in PHOTOS:
+        if item["id"] == photo_id:
+            item["isCollect"] = collected
+    return ok({"isCollect": collected})
 
 
 async def handle_geo_list(request):

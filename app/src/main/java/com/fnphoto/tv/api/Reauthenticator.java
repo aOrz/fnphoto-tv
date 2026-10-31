@@ -8,6 +8,7 @@ import org.json.JSONObject;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class Reauthenticator {
     private static final String TAG = "Reauthenticator";
@@ -23,8 +24,8 @@ public class Reauthenticator {
         SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         String current = prefs.getString("api_token", "");
         if (!current.isEmpty() && !current.equals(failedToken)) return true;
-        String key = prefs.getString("saved_url", "") + "\n" + prefs.getString("saved_user", "")
-                + "\n" + (failedToken == null ? "" : failedToken);
+        String key = RememberedNasTarget.source(prefs.getString("saved_source", ""), prefs.getString("saved_url", "")) + "\n" + prefs.getString("saved_user", "")
+                + "\n" + prefs.getString("login_session", "") + "\n" + (failedToken == null ? "" : failedToken);
         return REFRESH_GATE.run(key, () -> {
             String latest = prefs.getString("api_token", "");
             return (!latest.isEmpty() && !latest.equals(failedToken)) || performLogin(context);
@@ -33,12 +34,21 @@ public class Reauthenticator {
 
     private static boolean performLogin(Context context) {
         SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
-        String url = prefs.getString("saved_url", "");
+        String source = RememberedNasTarget.source(prefs.getString("saved_source", ""), prefs.getString("saved_url", ""));
         String user = prefs.getString("saved_user", "");
         String pass = prefs.getString("saved_pass", "");
+        String session = prefs.getString("login_session", "");
 
-        if (url.isEmpty() || user.isEmpty() || pass.isEmpty()) {
+        if (source.isEmpty() || user.isEmpty() || pass.isEmpty()) {
             Log.e(TAG, "No saved credentials for re-login");
+            return false;
+        }
+
+        final String url;
+        try {
+            url = RememberedNasTarget.resolve(source, Reauthenticator::discoverEndpoint);
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "NAS rediscovery failed", e);
             return false;
         }
 
@@ -63,10 +73,11 @@ public class Reauthenticator {
         });
 
         try {
-            latch.await(LOGIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!latch.await(LOGIN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { wsClient.close(); return false; }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             Log.e(TAG, "Re-login interrupted", e);
+            wsClient.close();
             return false;
         }
 
@@ -77,14 +88,19 @@ public class Reauthenticator {
                 String newSecret = json.optString("secret", "");
                 String newBackId = json.optString("backId", "");
 
-                if (!newToken.isEmpty() && !newSecret.isEmpty()) {
+                if (!newToken.isEmpty() && !newSecret.isEmpty()
+                        && session.equals(prefs.getString("login_session", ""))
+                        && user.equals(prefs.getString("saved_user", ""))) {
                     prefs.edit()
+                        .putString("nas_url", url)
+                        .putString("saved_url", url)
                         .putString("api_token", newToken)
                         .putString("secret", newSecret)
                         .putString("backId", newBackId)
                         .apply();
 
                     FnProtocolUtils.setBackId(newBackId);
+                    FnWebSocketClient.retainAuthenticatedSession(wsClient);
                     Log.i(TAG, "Re-login successful");
                     return true;
                 }
@@ -93,6 +109,26 @@ public class Reauthenticator {
             }
         }
 
+        wsClient.close();
         return false;
+    }
+
+    private static String discoverEndpoint(String fnId) throws java.io.IOException {
+        CountDownLatch ready = new CountDownLatch(1);
+        AtomicReference<String> endpoint = new AtomicReference<>();
+        new FnConnectApi().fetchNasList(fnId, new FnConnectApi.NasListCallback() {
+            @Override public void onSuccess(FnConnectApi.NasListResponse response) {
+                try { endpoint.set(FnConnectApi.findReachableAddrSync(response.addresses)); }
+                finally { ready.countDown(); }
+            }
+            @Override public void onError(String error) { ready.countDown(); }
+        });
+        try {
+            if (!ready.await(45, TimeUnit.SECONDS)) throw new java.io.IOException("FN ID discovery timed out");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.io.IOException("FN ID discovery interrupted", e);
+        }
+        return endpoint.get();
     }
 }

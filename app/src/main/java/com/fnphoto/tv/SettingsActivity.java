@@ -66,7 +66,9 @@ public class SettingsActivity extends FragmentActivity {
         tvTitle.setTextColor(TEXT_PRIMARY);
         tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 34);
         tvTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tvTitle.setLetterSpacing(0.01f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            tvTitle.setLetterSpacing(0.01f);
+        }
         contentLayout.addView(tvTitle);
 
         TextView tvSubtitle = new TextView(this);
@@ -125,7 +127,7 @@ public class SettingsActivity extends FragmentActivity {
         addSectionHeader("关于");
         LinearLayout aboutCard = createCard();
         addInfoRow(aboutCard, "应用名称", "fnPhoto TV");
-        addInfoRow(aboutCard, "版本", "1.0.0");
+        addInfoRow(aboutCard, "版本", BuildConfig.VERSION_NAME);
         addInfoRow(aboutCard, "开发", "基于飞牛 NAS 相册系统");
         contentLayout.addView(aboutCard);
 
@@ -139,7 +141,9 @@ public class SettingsActivity extends FragmentActivity {
         header.setText(title);
         header.setTextColor(TEXT_TERTIARY);
         header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        header.setLetterSpacing(0.14f);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            header.setLetterSpacing(0.14f);
+        }
         header.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);

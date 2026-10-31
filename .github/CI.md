@@ -15,16 +15,21 @@ It runs the existing JVM tests and builds a debug APK:
 ```bash
 bash ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
 bash ./gradlew --no-daemon --stacktrace :app:assembleDebug
+bash ./gradlew --no-daemon --stacktrace :app:lintDebug
+python -m pip install -r test/requirements-contract.txt
+python -m unittest discover -s test -p test_mock_contract.py -v
 ```
 
-No emulator, NAS, or account credentials are needed. The `test/` Python scripts
-are manual mock-server tools, not the automated JVM test suite.
+No emulator, NAS, or account credentials are needed. The Python contract suite
+checks the mock's pagination, date/person/folder parameter names and idempotent
+collection writes. The other `test/` Python scripts are manual mock-server tools.
 
 Open a run in the repository's **Actions** tab to download the debug APK and
 JUnit XML/HTML test reports. Artifacts expire after 14 days. Test reports are
 uploaded even when tests fail, if Gradle produced them. A failed test or build
-fails the job; errors are not ignored. Device/instrumentation testing and lint
-are not part of this workflow.
+fails the job; errors are not ignored. Lint errors also fail the job; its HTML/XML
+reports are uploaded with test results. Device/instrumentation testing is not
+part of this workflow.
 
 ## Security and reproducibility
 
@@ -61,3 +66,6 @@ Install JDK 11 and Android SDK packages `platforms;android-29` and
 `build-tools;30.0.3`, set `JAVA_HOME` and `ANDROID_HOME`, then run the commands
 above from the repository root. No global Gradle installation or CI init script
 is required. The Gradle/AGP versions are intentionally unchanged by this CI work.
+
+Stacked functional PRs targeting `perf/progressive-loading` also run this workflow;
+this does not add push/deploy permissions or auto-merge behavior.
