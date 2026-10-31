@@ -128,3 +128,15 @@ C04 可选用 README 中的 `video_smoke.py` 辅助截图/暂停/恢复；须人
 - 历史已跑范围见 README 候选表：整合 UI、收藏追加修复、视频专项不是同一个 APK 的全量复验。
 - 默认未覆盖真实 NAS/电视、FN Connect真实网络发现、真实 token 过期、NAS 转码、4K/HEVC/HDR、多音轨/字幕、长视频、弱网/乱序全矩阵及长时间稳定性；需要单独授权环境和测试计划。
 - 结束：正常退出应用/模拟器，Ctrl+C停止服务，记录剩余失败/未跑项；仅保留需要的合成证据，不提交状态、二进制和日志。
+
+### 相册首次进入与焦点恢复
+
+- 从普通相册和“分享给我”目录的非首行/非首列打开相册，首批图片出现后实际焦点在首张，
+  首行首列可见；返回目录后换另一相册、重新进入同一相册均从首张开始。
+- 选择非首张进入详情再返回，保留返回位置；靠近页尾追加后仍保留当前图片，不能跳回首张。
+- 慢加载、空相册、错误不聚焦隐藏图片；首次错误后重试成功从首张开始。
+  请求期间打开抽屉不能被响应抢焦点，请求期间 Back 后旧响应不能覆盖目录。
+- 设备自动化：匹配 app/test APK，专用合成模拟器运行
+  `am instrument -w -e synthetic true -e class com.fnphoto.tv.PhotoWallDeviceTest com.fnphoto.tv.test/androidx.test.runner.AndroidJUnitRunner`。
+  测试使用进程内 loopback fixture，不代表真实 NAS/物理遥控兼容；截图在应用外部文件目录
+  `wall-evidence/`，包含普通/共享相册首张。

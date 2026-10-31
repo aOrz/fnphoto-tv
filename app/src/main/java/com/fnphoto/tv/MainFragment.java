@@ -67,6 +67,8 @@ public class MainFragment extends BrowseSupportFragment {
     private final PhotoPageDemand photoPageDemand = new PhotoPageDemand(MetadataLimits.MAX_SCAN_PAGES);
     private boolean photoDemandCheckPosted;
     private boolean photoFocusHandoffPending;
+    private boolean initialPhotoFocusPending;
+    private boolean photoEntryFocusHandoff;
     private long photoFocusHandoffGeneration;
     private String photoFocusHandoffTargetId;
     private boolean timelineLimited;
@@ -307,6 +309,8 @@ public class MainFragment extends BrowseSupportFragment {
         photoPageDemand.reset();
         photoDemandCheckPosted = false;
         photoFocusHandoffPending = false;
+        photoEntryFocusHandoff = false;
+        initialPhotoFocusPending = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         applyingPage = false;
@@ -636,10 +640,29 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void handoffPhotoPageFocus(int index) {
         if (index < 0 || index >= currentMediaList.size() || !isPageFooter(focusedPhotoWallCard())) return;
+        photoEntryFocusHandoff = false;
         photoFocusHandoffPending = true;
         photoFocusHandoffTargetId = currentMediaList.get(index).getId();
         final long handoff = ++photoFocusHandoffGeneration;
         selectPhotoFocusTarget(photoFocusHandoffTargetId, requests.generation(), handoff);
+    }
+
+    /** A new photo window starts at its first item, not a column remembered from its parent. */
+    private void focusFirstPhotoAfterLoad() {
+        if (!initialPhotoFocusPending) return;
+        initialPhotoFocusPending = false;
+        // Finish the loading/empty-state transition first. Leanback may preserve the loading
+        // footer or parent's row/column; neither is an explicit photo selection.
+        // Reuse the guarded, ID-based handoff so both the row and its column are selected after
+        // layout. The entry gesture owns focus only until the next user input or stop; loading
+        // may have automatically moved focus to the menu button while the old wall was hidden.
+        // Keep the entry permission with the handoff, not a separately posted old token: a
+        // width reflow may replace that token before the first row is laid out.
+        photoEntryFocusHandoff = true;
+        photoFocusHandoffPending = true;
+        photoFocusHandoffTargetId = currentMediaList.get(0).getId();
+        final long handoff = ++photoFocusHandoffGeneration;
+        restorePhotoFocusAfterLayout(photoFocusHandoffTargetId, requests.generation(), handoff);
     }
 
     private void restorePhotoFocusAfterLayout(String id, long generation, long handoff) {
@@ -658,6 +681,9 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoFocusHandoff(generation, handoff);
             return;
         }
+        // Initial entry may own focus lost automatically when the loading panel hid the wall.
+        // New user input clears this permission; reflow preserves it with the same target ID.
+        if (photoEntryFocusHandoff) rows.getVerticalGridView().requestFocus();
         // A reflow may briefly detach the old focused card. An unrelated focused control must
         // still win; only continue while the old wall owns focus (or the detached focus is null).
         if (getActivity().getCurrentFocus() != null && focusedPhotoWallCard() == null && !photoWallHasFocus()) {
@@ -728,6 +754,7 @@ public class MainFragment extends BrowseSupportFragment {
         if (!requests.isCurrent(generation) || handoff != photoFocusHandoffGeneration
                 || !photoFocusHandoffPending) return;
         photoFocusHandoffPending = false;
+        photoEntryFocusHandoff = false;
         photoFocusHandoffTargetId = null;
         reflowingWall = false;
         View card = focusedPhotoWallCard();
@@ -741,8 +768,10 @@ public class MainFragment extends BrowseSupportFragment {
 
     /** Called before dispatching new user input; the input itself retains its normal handling. */
     void cancelPhotoFocusHandoff() {
+        initialPhotoFocusPending = false;
         if (!photoFocusHandoffPending) return;
         photoFocusHandoffPending = false;
+        photoEntryFocusHandoff = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         reflowingWall = false;
@@ -751,6 +780,8 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onStop() {
         photoFocusHandoffPending = false;
+        photoEntryFocusHandoff = false;
+        initialPhotoFocusPending = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         reflowingWall = false;
@@ -852,6 +883,9 @@ public class MainFragment extends BrowseSupportFragment {
             } else {
                 return false;
             }
+            // Back is explicit navigation. Loading/empty/error panels may have moved actual
+            // focus to the menu, so return it to the parent's restored row and column as well.
+            focusBrowseContent();
             return true;
         } else if (currentPersonId > 0) {
             beginScreen();
@@ -1761,6 +1795,7 @@ public class MainFragment extends BrowseSupportFragment {
         currentMediaList = new ArrayList<>();
         photoPositions.clear();
         isPhotoListView = true;
+        initialPhotoFocusPending = true;
         mRowsAdapter.clear();
         loadPhotoPage();
     }
@@ -1777,7 +1812,11 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoPage(true);
             return;
         }
-        if (explicit) photoPageDemand.explicitContinue(currentMediaList.size());
+        if (explicit) {
+            photoPageDemand.explicitContinue(currentMediaList.size());
+            // Retry/continue of an empty window is a new explicit entry gesture.
+            if (currentMediaList.isEmpty()) initialPhotoFocusPending = true;
+        }
         if (!photoPageDemand.canStartRequest()) {
             finishPhotoPage(true);
             return;
@@ -1889,20 +1928,8 @@ public class MainFragment extends BrowseSupportFragment {
                     requestPhotoPage();
                     return;
                 }
-                if (previousCount == 0 && !currentMediaList.isEmpty()) {
-                    final long generation = requests.generation();
-                    positionHandler.post(() -> {
-                        if (!requests.isCurrent(generation) || !isResumed()
-                                || !(getActivity() instanceof MainActivity)
-                                || !((MainActivity) getActivity()).canFocusBrowseContent()) return;
-                        if (isPageFooter(focusedPhotoWallCard()) && !photoFocusHandoffPending) {
-                            handoffPhotoPageFocus(0);
-                        } else if (getActivity().getCurrentFocus() == null) {
-                            restoreCardSelection(0, 0);
-                        }
-                    });
-                }
                 finishPhotoPage(true);
+                if (previousCount == 0 && !currentMediaList.isEmpty()) focusFirstPhotoAfterLoad();
             }
             @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable error) {
                 photoPaging.fail();
@@ -1994,6 +2021,8 @@ public class MainFragment extends BrowseSupportFragment {
         photoPageDemand.reset();
         photoDemandCheckPosted = false;
         photoFocusHandoffPending = false;
+        photoEntryFocusHandoff = false;
+        initialPhotoFocusPending = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         resetPagedRows();
