@@ -12,8 +12,26 @@ import java.util.concurrent.TimeUnit;
 public class Reauthenticator {
     private static final String TAG = "Reauthenticator";
     private static final long LOGIN_TIMEOUT_SECONDS = 30;
+    private static final TokenRefreshGate REFRESH_GATE = new TokenRefreshGate();
 
     public static boolean reLoginSync(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
+        return reLoginSync(context, prefs.getString("api_token", ""));
+    }
+
+    public static boolean reLoginSync(Context context, String failedToken) {
+        SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
+        String current = prefs.getString("api_token", "");
+        if (!current.isEmpty() && !current.equals(failedToken)) return true;
+        String key = prefs.getString("saved_url", "") + "\n" + prefs.getString("saved_user", "")
+                + "\n" + (failedToken == null ? "" : failedToken);
+        return REFRESH_GATE.run(key, () -> {
+            String latest = prefs.getString("api_token", "");
+            return (!latest.isEmpty() && !latest.equals(failedToken)) || performLogin(context);
+        });
+    }
+
+    private static boolean performLogin(Context context) {
         SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         String url = prefs.getString("saved_url", "");
         String user = prefs.getString("saved_user", "");
@@ -47,6 +65,7 @@ public class Reauthenticator {
         try {
             latch.await(LOGIN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             Log.e(TAG, "Re-login interrupted", e);
             return false;
         }

@@ -23,10 +23,8 @@ import androidx.core.content.ContextCompat;
 import androidx.leanback.widget.ImageCardView;
 import androidx.leanback.widget.Presenter;
 
-import com.bumptech.glide.Glide;
-import com.bumptech.glide.load.model.GlideUrl;
-import com.bumptech.glide.load.model.LazyHeaders;
 import com.fnphoto.tv.cache.CachedImageLoader;
+import com.fnphoto.tv.cache.ImageRequestScope;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,6 +48,11 @@ public class CardPresenter extends Presenter {
 
     private String baseUrl;
 
+    private static final class CardViewHolder extends Presenter.ViewHolder {
+        final ImageRequestScope images = new ImageRequestScope();
+        CardViewHolder(View view) { super(view); }
+    }
+
     public CardPresenter(String baseUrl) {
         this.baseUrl = baseUrl;
     }
@@ -63,7 +66,7 @@ public class CardPresenter extends Presenter {
         applyCardSurface(cardView);
         customizeInfoField(cardView);
 
-        return new ViewHolder(cardView);
+        return new CardViewHolder(cardView);
     }
 
     /**
@@ -129,8 +132,14 @@ public class CardPresenter extends Presenter {
     public void onBindViewHolder(ViewHolder viewHolder, Object item) {
         MediaItem mediaItem = (MediaItem) item;
         ImageCardView cardView = (ImageCardView) viewHolder.view;
+        ImageRequestScope images = ((CardViewHolder) viewHolder).images;
+        images.clear();
+        CachedImageLoader.clear(cardView.getMainImageView());
 
         cardView.setTitleText(mediaItem.getTitle());
+        // A pooled card may previously have represented an album/person/folder.
+        // Photo, video and date branches do not set a subtitle of their own.
+        cardView.setContentText(null);
         
         // 存储当前item的ID和类型，用于检查视图是否已被重用
         cardView.setTag(R.id.media_item_id, mediaItem.getId());
@@ -141,14 +150,14 @@ public class CardPresenter extends Presenter {
             
             List<String> previewUrls = mediaItem.getPreviewThumbUrls();
             if (previewUrls != null && !previewUrls.isEmpty()) {
-                loadPreviewImages(cardView, previewUrls, mediaItem.getId());
+                loadPreviewImages(cardView, previewUrls, mediaItem.getId(), images);
             } else {
                 cardView.setMainImage(createPlaceholderDrawable(cardView.getContext()));
             }
         } else if ("video".equals(mediaItem.getType())) {
             // 视频类型：显示缩略图并添加播放图标
             cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
-            loadVideoThumbnail(cardView, mediaItem);
+            loadVideoThumbnail(cardView, mediaItem, images);
         } else if ("folder".equals(mediaItem.getType())) {
             cardView.setMainImageDimensions(CARD_WIDTH, CARD_HEIGHT);
             cardView.setMainImage(getFolderCardDrawable(cardView.getContext()));
@@ -168,7 +177,8 @@ public class CardPresenter extends Presenter {
         }
     }
 
-    private void loadVideoThumbnail(ImageCardView cardView, MediaItem mediaItem) {
+    private void loadVideoThumbnail(ImageCardView cardView, MediaItem mediaItem, ImageRequestScope images) {
+        final long generation = images.generation();
         Context context = cardView.getContext();
         SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         String token = prefs.getString("api_token", "");
@@ -191,7 +201,7 @@ public class CardPresenter extends Presenter {
         final String itemId = mediaItem.getId();
         
         // 加载缩略图并添加播放图标
-        CachedImageLoader.loadImage(context, finalUrl, token, CARD_WIDTH, CARD_HEIGHT,
+        CachedImageLoader.RequestHandle request = CachedImageLoader.loadImage(context, finalUrl, token, CARD_WIDTH, CARD_HEIGHT,
                 new CachedImageLoader.ImageLoadCallback() {
                     @Override
                     public void onBitmapLoaded(Bitmap bitmap) {
@@ -199,7 +209,7 @@ public class CardPresenter extends Presenter {
                         String currentId = (String) cardView.getTag(R.id.media_item_id);
                         String currentType = (String) cardView.getTag(R.id.media_item_type);
                         
-                        if (!itemId.equals(currentId) || !"video".equals(currentType)) {
+                        if (!images.isCurrent(generation) || !itemId.equals(currentId) || !"video".equals(currentType)) {
                             Log.w(TAG, "View reused, skipping video thumbnail");
                             return;
                         }
@@ -212,11 +222,13 @@ public class CardPresenter extends Presenter {
                     
                     @Override
                     public void onLoadFailed() {
+                        if (!images.isCurrent(generation)) return;
                         // 加载失败，使用默认播放图标
                         Drawable drawable = ContextCompat.getDrawable(context, android.R.drawable.ic_media_play);
                         cardView.setMainImage(drawable);
                     }
                 });
+        images.add(request::clear);
     }
     
     /**
@@ -279,7 +291,8 @@ public class CardPresenter extends Presenter {
         return composite;
     }
 
-    private void loadPreviewImages(ImageCardView cardView, List<String> urls, String itemId) {
+    private void loadPreviewImages(ImageCardView cardView, List<String> urls, String itemId, ImageRequestScope images) {
+        final long generation = images.generation();
         Context context = cardView.getContext();
         SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         String token = prefs.getString("api_token", "");
@@ -299,10 +312,11 @@ public class CardPresenter extends Presenter {
             final int index = i;
             
             // 使用带缓存的加载器
-            CachedImageLoader.loadImage(context, url, token, 150, 150, 
+            CachedImageLoader.RequestHandle request = CachedImageLoader.loadImage(context, url, token, 150, 150,
                     new CachedImageLoader.ImageLoadCallback() {
                         @Override
                         public void onBitmapLoaded(Bitmap bitmap) {
+                            if (!images.isCurrent(generation)) return;
                             bitmaps[index] = bitmap;
                             int current = loadedCount.incrementAndGet();
                             Log.d(TAG, "Preview loaded " + current + "/" + count + " for " + itemId);
@@ -320,6 +334,7 @@ public class CardPresenter extends Presenter {
                         
                         @Override
                         public void onLoadFailed() {
+                            if (!images.isCurrent(generation)) return;
                             int current = loadedCount.incrementAndGet();
                             Log.w(TAG, "Preview load failed " + current + "/" + count + " for " + itemId);
                             
@@ -331,7 +346,12 @@ public class CardPresenter extends Presenter {
                                 }
                             }
                         }
+                        @Override
+                        public void onLoadCleared() {
+                            bitmaps[index] = null;
+                        }
                     });
+            images.add(request::clear);
         }
     }
 
@@ -464,6 +484,8 @@ public class CardPresenter extends Presenter {
     @Override
     public void onUnbindViewHolder(ViewHolder viewHolder) {
         ImageCardView cardView = (ImageCardView) viewHolder.view;
+        ((CardViewHolder) viewHolder).images.clear();
+        CachedImageLoader.clear(cardView.getMainImageView());
         cardView.setBadgeImage(null);
         cardView.setMainImage(null);
         cardView.setTag(R.id.media_item_id, null);

@@ -3,14 +3,10 @@ package com.fnphoto.tv;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.TextUtils;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -29,10 +25,10 @@ import com.fnphoto.tv.api.FnAuthUtils;
 import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.api.HttpClientProvider;
 import com.fnphoto.tv.cache.CachedImageLoader;
+import com.fnphoto.tv.paging.GridPageState;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import retrofit2.Call;
 import retrofit2.Callback;
@@ -45,7 +41,6 @@ import retrofit2.converter.gson.GsonConverterFactory;
  * 支持混合视图：文件夹列表 + 照片墙
  */
 public class FolderBrowseActivity extends FragmentActivity {
-    private static final String TAG = "FolderBrowseActivity";
     private static final int GRID_SPAN_COUNT = 6; // 照片墙每行显示6个
     private static final int FOLDER_GRID_SPAN_COUNT = 4; // 文件夹每行显示4个
     private static final int PAGE_LIMIT = 100; // 每页加载数量
@@ -67,11 +62,15 @@ public class FolderBrowseActivity extends FragmentActivity {
 
     private List<FnHttpApi.SubFolderItem> folderList = new ArrayList<>();
     private List<FnHttpApi.FolderMediaItem> photoList = new ArrayList<>();
+    private final List<MediaItem> mediaItems = new ArrayList<>();
 
-    private int loadedCount = 0;
-    private boolean hasMorePhotos = true;
-    private boolean isLoading = false;
-    private AtomicInteger pendingRequests = new AtomicInteger(2); // 两个请求待完成
+    private final GridPageState pages = new GridPageState(PAGE_LIMIT);
+    private Call<FnHttpApi.FolderFileListResponse> mediaCall;
+    private Call<FnHttpApi.SubFolderListResponse> folderCall;
+    private boolean foldersLoading;
+    private boolean foldersFailed;
+    private boolean destroyed;
+    private MediaListHolder.PageCallback detailCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -129,6 +128,10 @@ public class FolderBrowseActivity extends FragmentActivity {
         tvLoading.setTextColor(Color.parseColor("#A8AFBF"));
         tvLoading.setTextSize(14);
         tvLoading.setPadding(dp(64), dp(14), dp(64), dp(6));
+        tvLoading.setOnClickListener(v -> {
+            if (foldersFailed) loadSubFolders();
+            loadMediaFiles(true);
+        });
         rootLayout.addView(tvLoading);
 
         // 内容区域
@@ -159,6 +162,7 @@ public class FolderBrowseActivity extends FragmentActivity {
         rvFolders.setVisibility(View.GONE);
         folderAdapter = new FolderAdapter();
         rvFolders.setAdapter(folderAdapter);
+        rvFolders.setLayoutManager(new GridLayoutManager(this, FOLDER_GRID_SPAN_COUNT));
         layoutContent.addView(rvFolders);
 
         // 照片墙区域
@@ -182,6 +186,15 @@ public class FolderBrowseActivity extends FragmentActivity {
         rvPhotos.setVisibility(View.GONE);
         photoAdapter = new PhotoGridAdapter();
         rvPhotos.setAdapter(photoAdapter);
+        rvPhotos.setLayoutManager(new GridLayoutManager(this, GRID_SPAN_COUNT));
+        rvPhotos.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override public void onScrolled(RecyclerView view, int dx, int dy) {
+                GridLayoutManager manager = (GridLayoutManager) view.getLayoutManager();
+                if (manager != null && manager.findLastVisibleItemPosition() >= photoList.size() - 12) {
+                    loadMediaFiles(false);
+                }
+            }
+        });
         layoutContent.addView(rvPhotos);
 
         rootLayout.addView(layoutContent);
@@ -212,107 +225,130 @@ public class FolderBrowseActivity extends FragmentActivity {
     }
 
     private void loadFolderContent() {
-        isLoading = true;
-        pendingRequests.set(2);
-
-        // 并行加载子文件夹和媒体文件
+        if (api == null || destroyed) return;
         loadSubFolders();
-        loadMediaFiles(0);
+        loadMediaFiles(false);
     }
 
     private void loadSubFolders() {
+        if (api == null || destroyed || foldersLoading) return;
+        foldersLoading = true;
+        foldersFailed = false;
+        updateLoadingStatus();
         String params = "desc=false&orderBy=2&folderPath=" + currentFolderPath;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/folder_view/getFolderList", "GET", params);
-
-        api.getSubFolders(token, authx, currentFolderPath, false, 2)
-                .enqueue(new Callback<FnHttpApi.SubFolderListResponse>() {
-                    @Override
-                    public void onResponse(Call<FnHttpApi.SubFolderListResponse> call,
-                                           Response<FnHttpApi.SubFolderListResponse> response) {
-                        if (response.isSuccessful() && response.body() != null) {
-                            FnHttpApi.SubFolderListResponse result = response.body();
-                            if (result.code == 0 && result.data != null && result.data.list != null) {
-                                folderList.clear();
-                                folderList.addAll(result.data.list);
-                                updateFoldersUI();
-                            }
-                        } else {
-                            Log.e(TAG, "加载子文件夹失败: HTTP " + response.code());
-                        }
-                        checkLoadingComplete();
-                    }
-
-                    @Override
-                    public void onFailure(Call<FnHttpApi.SubFolderListResponse> call, Throwable t) {
-                        Log.e(TAG, "加载子文件夹失败", t);
-                        checkLoadingComplete();
-                    }
-                });
-    }
-
-    private void loadMediaFiles(int offset) {
-        String params = "folderPath=" + currentFolderPath + "&desc=false&orderBy=2&limit=" + PAGE_LIMIT + "&offset=" + offset;
-        String authx = FnAuthUtils.generateAuthX("/p/api/v1/folder_view/getFileList", "GET", params);
-
-        api.getFolderFiles(token, authx, currentFolderPath, false, 2, PAGE_LIMIT, offset)
-                .enqueue(new Callback<FnHttpApi.FolderFileListResponse>() {
-                    @Override
-                    public void onResponse(Call<FnHttpApi.FolderFileListResponse> call,
-                                           Response<FnHttpApi.FolderFileListResponse> response) {
-                        if (response.isSuccessful() && response.body() != null) {
-                            FnHttpApi.FolderFileListResponse result = response.body();
-                            if (result.code == 0 && result.data != null && result.data.list != null) {
-                                photoList.addAll(result.data.list);
-                                loadedCount += result.data.list.size();
-                                hasMorePhotos = result.data.list.size() >= PAGE_LIMIT;
-                                updatePhotosUI();
-                            }
-                        } else {
-                            Log.e(TAG, "加载媒体文件失败: HTTP " + response.code());
-                        }
-                        checkLoadingComplete();
-                    }
-
-                    @Override
-                    public void onFailure(Call<FnHttpApi.FolderFileListResponse> call, Throwable t) {
-                        Log.e(TAG, "加载媒体文件失败", t);
-                        checkLoadingComplete();
-                    }
-                });
-    }
-
-    private void checkLoadingComplete() {
-        int remaining = pendingRequests.decrementAndGet();
-        if (remaining <= 0) {
-            isLoading = false;
-            tvLoading.setVisibility(View.GONE);
-
-            if (folderList.isEmpty() && photoList.isEmpty()) {
-                Toast.makeText(this, "该文件夹为空", Toast.LENGTH_SHORT).show();
+        folderCall = api.getSubFolders(token, authx, currentFolderPath, false, 2);
+        folderCall.enqueue(new Callback<FnHttpApi.SubFolderListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.SubFolderListResponse> call,
+                    Response<FnHttpApi.SubFolderListResponse> response) {
+                if (destroyed || call != folderCall) return;
+                foldersLoading = false;
+                FnHttpApi.SubFolderListResponse result = response.body();
+                if (response.isSuccessful() && result != null && result.code == 0
+                        && result.data != null && result.data.list != null) {
+                    folderList.clear();
+                    folderList.addAll(result.data.list);
+                    findViewWithTag("folders_title").setVisibility(folderList.isEmpty() ? View.GONE : View.VISIBLE);
+                    rvFolders.setVisibility(folderList.isEmpty() ? View.GONE : View.VISIBLE);
+                    folderAdapter.notifyDataSetChanged();
+                } else {
+                    foldersFailed = true;
+                }
+                updateLoadingStatus();
             }
+            @Override public void onFailure(Call<FnHttpApi.SubFolderListResponse> call, Throwable t) {
+                if (destroyed || call != folderCall || call.isCanceled()) return;
+                foldersLoading = false;
+                foldersFailed = true;
+                updateLoadingStatus();
+            }
+        });
+    }
+
+    private void loadMediaFiles(boolean retry) {
+        if (api == null || destroyed) return;
+        final GridPageState.Request page = pages.begin(retry);
+        if (page == null) return;
+        updateLoadingStatus();
+        String params = "folderPath=" + currentFolderPath + "&desc=false&orderBy=2&limit="
+                + PAGE_LIMIT + "&offset=" + page.offset;
+        String authx = FnAuthUtils.generateAuthX("/p/api/v1/folder_view/getFileList", "GET", params);
+        mediaCall = api.getFolderFiles(token, authx, currentFolderPath, false, 2, PAGE_LIMIT, page.offset);
+        mediaCall.enqueue(new Callback<FnHttpApi.FolderFileListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.FolderFileListResponse> call,
+                    Response<FnHttpApi.FolderFileListResponse> response) {
+                if (destroyed || !pages.isCurrent(page)) return;
+                FnHttpApi.FolderFileListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    pages.fail(page);
+                    updateLoadingStatus();
+                    return;
+                }
+                List<FnHttpApi.FolderMediaItem> batch = result.data.list;
+                List<Integer> ids = new ArrayList<>();
+                for (FnHttpApi.FolderMediaItem item : batch) ids.add(item.id);
+                // total==0 may mean the field was omitted by older servers.
+                Boolean hasNext = result.data.total > 0
+                        ? page.offset + batch.size() < result.data.total : null;
+                boolean[] added = pages.accept(page, ids, hasNext);
+                if (added == null) return;
+                int start = photoList.size();
+                for (int i = 0; i < batch.size(); i++) {
+                    if (added[i]) {
+                        FnHttpApi.FolderMediaItem item = batch.get(i);
+                        photoList.add(item);
+                        mediaItems.add(toMediaItem(item, baseUrl));
+                    }
+                }
+                if (!photoList.isEmpty()) {
+                    findViewWithTag("photos_title").setVisibility(View.VISIBLE);
+                    rvPhotos.setVisibility(View.VISIBLE);
+                }
+                if (photoList.size() > start) photoAdapter.notifyItemRangeInserted(start, photoList.size() - start);
+                updateLoadingStatus();
+            }
+            @Override public void onFailure(Call<FnHttpApi.FolderFileListResponse> call, Throwable t) {
+                if (destroyed || call.isCanceled()) return;
+                if (pages.fail(page)) updateLoadingStatus();
+            }
+        });
+    }
+
+    private void updateLoadingStatus() {
+        if (detailCallback != null && !pages.isLoading()) {
+            MediaListHolder.PageCallback callback = detailCallback;
+            detailCallback = null;
+            if (pages.hasError()) callback.onFailure();
+            else callback.onLoaded(toMediaItems(), pages.hasMore());
+        }
+        boolean error = foldersFailed || pages.hasError();
+        tvLoading.setFocusable(error);
+        tvLoading.setClickable(error);
+        if (error) {
+            tvLoading.setText("部分内容加载失败，按确定重试（已加载 " + photoList.size() + " 项）");
+        } else if (pages.isStalled()) {
+            tvLoading.setText("服务器返回重复页，已停止加载（已加载 " + photoList.size() + " 项）");
+        } else if (foldersLoading || pages.isLoading()) {
+            tvLoading.setText(photoList.isEmpty() ? "加载中..." : "正在加载更多...");
+        } else {
+            tvLoading.setText(folderList.isEmpty() && photoList.isEmpty() ? "该文件夹为空"
+                    : "已加载 " + photoList.size() + " 项" + (pages.hasMore() ? "，下移加载更多" : ""));
         }
     }
 
-    private void updateFoldersUI() {
-        if (!folderList.isEmpty()) {
-            findViewWithTag("folders_title").setVisibility(View.VISIBLE);
-            rvFolders.setVisibility(View.VISIBLE);
-            folderAdapter.notifyDataSetChanged();
-
-            rvFolders.setLayoutManager(new GridLayoutManager(this, FOLDER_GRID_SPAN_COUNT));
-            rvFolders.setHasFixedSize(true);
+    @Override protected void onDestroy() {
+        destroyed = true;
+        pages.close();
+        if (mediaCall != null) mediaCall.cancel();
+        if (folderCall != null) folderCall.cancel();
+        if (detailCallback != null) {
+            MediaListHolder.PageCallback callback = detailCallback;
+            detailCallback = null;
+            callback.onFailure();
         }
-    }
-
-    private void updatePhotosUI() {
-        if (!photoList.isEmpty()) {
-            findViewWithTag("photos_title").setVisibility(View.VISIBLE);
-            rvPhotos.setVisibility(View.VISIBLE);
-            photoAdapter.notifyDataSetChanged();
-
-            rvPhotos.setLayoutManager(new GridLayoutManager(this, GRID_SPAN_COUNT));
-            rvPhotos.setHasFixedSize(true);
-        }
+        if (rvPhotos != null) rvPhotos.setAdapter(null);
+        super.onDestroy();
     }
 
     private View findViewWithTag(String tag) {
@@ -395,6 +431,8 @@ public class FolderBrowseActivity extends FragmentActivity {
 
     // ========== 照片网格适配器 ==========
     private class PhotoGridAdapter extends RecyclerView.Adapter<PhotoGridAdapter.ViewHolder> {
+        PhotoGridAdapter() { setHasStableIds(true); }
+        @Override public long getItemId(int position) { return photoList.get(position).id; }
 
         @Override
         public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
@@ -407,9 +445,14 @@ public class FolderBrowseActivity extends FragmentActivity {
             FnHttpApi.FolderMediaItem item = photoList.get(position);
             holder.bind(item);
 
-            if (position == photoList.size() - 5 && hasMorePhotos && !isLoading) {
-                loadMediaFiles(loadedCount);
+            if (position >= photoList.size() - 12) {
+                rvPhotos.post(() -> loadMediaFiles(false));
             }
+        }
+
+        @Override public void onViewRecycled(ViewHolder holder) {
+            CachedImageLoader.clear(holder.ivPhoto);
+            super.onViewRecycled(holder);
         }
 
         @Override
@@ -445,47 +488,49 @@ public class FolderBrowseActivity extends FragmentActivity {
             void bind(FnHttpApi.FolderMediaItem item) {
                 String thumbUrl = baseUrl + "/p/api/v1/stream/p/t/" + item.id + "/s/" + item.photoUUID;
 
-                CachedImageLoader.loadImage(FolderBrowseActivity.this, thumbUrl, token,
-                        ivPhoto.getWidth(), ivPhoto.getHeight(),
-                        new CachedImageLoader.ImageLoadCallback() {
-                            @Override
-                            public void onBitmapLoaded(Bitmap bitmap) {
-                                ivPhoto.setImageBitmap(bitmap);
-                            }
-
-                            @Override
-                            public void onLoadFailed() {
-                                ivPhoto.setImageResource(android.R.drawable.ic_menu_gallery);
-                            }
-                        });
+                CachedImageLoader.loadIntoImageView(ivPhoto, thumbUrl, token);
 
                 vVideoIndicator.setVisibility("video".equals(item.category) ? View.VISIBLE : View.GONE);
             }
         }
     }
 
+    private List<MediaItem> toMediaItems() {
+        return new ArrayList<>(mediaItems);
+    }
+
+    private static MediaItem toMediaItem(FnHttpApi.FolderMediaItem item, String baseUrl) {
+        String thumbUrl = baseUrl + "/p/api/v1/stream/p/t/" + item.id + "/s/" + item.photoUUID;
+        String mediaUrl = "video".equals(item.category)
+                ? baseUrl + "/p/api/v1/stream/v/" + item.id
+                : baseUrl + "/p/api/v1/stream/p/t/" + item.id + "/o/" + item.photoUUID;
+        return new MediaItem(String.valueOf(item.id), item.fileName, item.category, thumbUrl, mediaUrl);
+    }
+
     private void openMediaDetail(int position) {
-        List<MediaItem> mediaItems = new ArrayList<>();
-        for (FnHttpApi.FolderMediaItem item : photoList) {
-            String thumbUrl = baseUrl + "/p/api/v1/stream/p/t/" + item.id + "/s/" + item.photoUUID;
-            String mediaUrl;
-            if ("video".equals(item.category)) {
-                mediaUrl = baseUrl + "/p/api/v1/stream/v/" + item.id;
-            } else {
-                mediaUrl = baseUrl + "/p/api/v1/stream/p/t/" + item.id + "/o/" + item.photoUUID;
+        MediaListHolder.set(toMediaItems(), new MediaListHolder.PageSource() {
+            private final GridPageState.Delivery delivery = new GridPageState.Delivery(mediaItems.size());
+            @Override public boolean hasMore() {
+                return !(destroyed) && delivery.hasMore(mediaItems.size(), pages.hasMore());
             }
-
-            MediaItem mediaItem = new MediaItem(
-                    String.valueOf(item.id),
-                    item.fileName,
-                    item.category,
-                    thumbUrl,
-                    mediaUrl
-            );
-            mediaItems.add(mediaItem);
-        }
-
-        MediaListHolder.set(mediaItems);
+            @Override public void loadMore(MediaListHolder.PageCallback callback) {
+                if (destroyed) { callback.onFailure(); return; }
+                if (delivery.hasBuffered(mediaItems.size()) || !pages.hasMore()) {
+                    delivery.delivered(mediaItems.size());
+                    callback.onLoaded(toMediaItems(), pages.hasMore());
+                    return;
+                }
+                if (detailCallback != null) { callback.onFailure(); return; }
+                detailCallback = new MediaListHolder.PageCallback() {
+                    @Override public void onLoaded(List<MediaItem> items, boolean hasMore) {
+                        delivery.delivered(items.size());
+                        callback.onLoaded(items, hasMore);
+                    }
+                    @Override public void onFailure() { callback.onFailure(); }
+                };
+                if (!pages.isLoading()) loadMediaFiles(true);
+            }
+        });
         Intent intent = new Intent(this, MediaDetailActivity.class);
         intent.putExtra("CURRENT_INDEX", position);
         startActivity(intent);

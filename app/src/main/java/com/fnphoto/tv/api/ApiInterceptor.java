@@ -26,9 +26,7 @@ public class ApiInterceptor implements Interceptor {
         if (response.code() == 401) {
             String url = request.url().toString();
             Log.w(TAG, "Received 401 for: " + url);
-            response.close();
-
-            boolean reloginSuccess = Reauthenticator.reLoginSync(context);
+            boolean reloginSuccess = Reauthenticator.reLoginSync(context, request.header("accesstoken"));
             if (reloginSuccess) {
                 SharedPreferences prefs = context.getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
                 String newToken = prefs.getString("api_token", "");
@@ -45,6 +43,8 @@ public class ApiInterceptor implements Interceptor {
                         .build();
 
                     Log.i(TAG, "Retrying request with new token: " + path);
+                    // Preserve the readable original 401 body when refresh fails.
+                    response.close();
                     return chain.proceed(newRequest);
                 }
             } else {

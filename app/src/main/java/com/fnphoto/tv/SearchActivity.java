@@ -3,7 +3,6 @@ package com.fnphoto.tv;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -11,13 +10,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.text.TextUtils;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -33,6 +30,7 @@ import com.fnphoto.tv.api.FnAuthUtils;
 import com.fnphoto.tv.api.HttpClientProvider;
 import com.fnphoto.tv.api.FnHttpApi;
 import com.fnphoto.tv.cache.CachedImageLoader;
+import com.fnphoto.tv.paging.GridPageState;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -44,7 +42,6 @@ import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
 public class SearchActivity extends FragmentActivity {
-    private static final String TAG = "SearchActivity";
     private static final int GRID_SPAN = 6;
     private static final int SEARCH_DELAY = 500;
     private static final int PAGE_LIMIT = 100;
@@ -58,8 +55,15 @@ public class SearchActivity extends FragmentActivity {
     private String token;
     private String baseUrl;
     private List<FnHttpApi.GalleryPhoto> searchResults = new ArrayList<>();
+    private final List<MediaItem> mediaItems = new ArrayList<>();
     private Handler searchHandler = new Handler(Looper.getMainLooper());
     private String currentQuery = "";
+    private final GridPageState pages = new GridPageState(PAGE_LIMIT);
+    private Call<FnHttpApi.GalleryListResponse> searchCall;
+    private boolean destroyed;
+    private boolean queryReady;
+    private Object dataGeneration = new Object();
+    private MediaListHolder.PageCallback detailCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -91,7 +95,9 @@ public class SearchActivity extends FragmentActivity {
         String extraQuery = getIntent().getStringExtra("EXTRA_QUERY");
         if (extraQuery != null && !extraQuery.isEmpty()) {
             editSearch.setText(extraQuery);
-            performSearch(extraQuery);
+            searchHandler.removeCallbacksAndMessages(null);
+            queryReady = true;
+            loadSearchPage(false);
         }
     }
 
@@ -149,6 +155,7 @@ public class SearchActivity extends FragmentActivity {
         tvStatus.setTextColor(Color.parseColor("#A8AFBF"));
         tvStatus.setTextSize(13);
         tvStatus.setPadding(dp(72), dp(14), dp(64), dp(6));
+        tvStatus.setOnClickListener(v -> loadSearchPage(true));
         rootLayout.addView(tvStatus);
 
         // 结果网格
@@ -162,6 +169,14 @@ public class SearchActivity extends FragmentActivity {
 
         adapter = new SearchAdapter();
         rvResults.setAdapter(adapter);
+        rvResults.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override public void onScrolled(RecyclerView view, int dx, int dy) {
+                GridLayoutManager manager = (GridLayoutManager) view.getLayoutManager();
+                if (manager != null && manager.findLastVisibleItemPosition() >= searchResults.size() - 12) {
+                    loadSearchPage(false);
+                }
+            }
+        });
         rootLayout.addView(rvResults);
 
         setContentView(rootLayout);
@@ -207,12 +222,10 @@ public class SearchActivity extends FragmentActivity {
             public void onTextChanged(CharSequence s, int start, int before, int count) {
                 searchHandler.removeCallbacksAndMessages(null);
                 String query = s.toString().trim();
-                if (query.length() >= 1) {
-                    searchHandler.postDelayed(() -> performSearch(query), SEARCH_DELAY);
-                } else {
-                    searchResults.clear();
-                    adapter.notifyDataSetChanged();
-                    tvStatus.setText("输入关键词开始搜索");
+                // Invalidate immediately, not after debounce: an old response must not repaint.
+                resetSearch(query);
+                if (!query.isEmpty()) {
+                    searchHandler.postDelayed(() -> { queryReady = true; loadSearchPage(false); }, SEARCH_DELAY);
                 }
             }
 
@@ -234,40 +247,93 @@ public class SearchActivity extends FragmentActivity {
         }
     }
 
-    private void performSearch(String keyword) {
-        currentQuery = keyword;
-        tvStatus.setText("搜索中...");
+    private void resetSearch(String query) {
+        dataGeneration = new Object();
+        pages.reset();
+        if (searchCall != null) searchCall.cancel();
+        if (detailCallback != null) {
+            MediaListHolder.PageCallback callback = detailCallback;
+            detailCallback = null;
+            callback.onFailure();
+        }
+        currentQuery = query;
+        queryReady = false;
+        searchResults.clear();
+        mediaItems.clear();
+        adapter.notifyDataSetChanged();
+        updateSearchStatus();
+    }
 
-        if (api == null) return;
-
-        String params = "keyword=" + keyword + "&limit=" + PAGE_LIMIT + "&offset=0";
+    private void loadSearchPage(boolean retry) {
+        if (api == null || destroyed || !queryReady || currentQuery.isEmpty()) return;
+        final GridPageState.Request page = pages.begin(retry);
+        if (page == null) return;
+        updateSearchStatus();
+        String params = "keyword=" + currentQuery + "&limit=" + PAGE_LIMIT + "&offset=" + page.offset;
         String authx = FnAuthUtils.generateAuthX("/p/api/v1/photo/search", "GET", params);
-
-        api.searchPhotos(token, authx, keyword, PAGE_LIMIT, 0)
-                .enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
-                    @Override
-                    public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
-                                           Response<FnHttpApi.GalleryListResponse> response) {
-                        if (response.isSuccessful() && response.body() != null) {
-                            FnHttpApi.GalleryListResponse result = response.body();
-                            if (result.code == 0 && result.data != null && result.data.list != null) {
-                                searchResults = result.data.list;
-                                adapter.notifyDataSetChanged();
-                                tvStatus.setText("找到 " + searchResults.size() + " 个结果");
-                            } else {
-                                tvStatus.setText("搜索失败: " + result.msg);
-                            }
-                        } else {
-                            tvStatus.setText("搜索失败: HTTP " + response.code());
-                        }
+        searchCall = api.searchPhotos(token, authx, currentQuery, PAGE_LIMIT, page.offset);
+        searchCall.enqueue(new Callback<FnHttpApi.GalleryListResponse>() {
+            @Override public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
+                    Response<FnHttpApi.GalleryListResponse> response) {
+                if (destroyed || !pages.isCurrent(page)) return;
+                FnHttpApi.GalleryListResponse result = response.body();
+                if (!response.isSuccessful() || result == null || result.code != 0
+                        || result.data == null || result.data.list == null) {
+                    pages.fail(page);
+                    updateSearchStatus();
+                    return;
+                }
+                List<FnHttpApi.GalleryPhoto> batch = result.data.list;
+                List<Integer> ids = new ArrayList<>();
+                for (FnHttpApi.GalleryPhoto photo : batch) ids.add(photo.id);
+                boolean[] additions = pages.accept(page, ids, result.data.hasNext);
+                if (additions == null) return;
+                int start = searchResults.size();
+                for (int i = 0; i < batch.size(); i++) {
+                    if (additions[i]) {
+                        FnHttpApi.GalleryPhoto photo = batch.get(i);
+                        searchResults.add(photo);
+                        mediaItems.add(toMediaItem(photo, baseUrl));
                     }
+                }
+                if (searchResults.size() > start) adapter.notifyItemRangeInserted(start, searchResults.size() - start);
+                updateSearchStatus();
+            }
+            @Override public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
+                if (destroyed || call.isCanceled()) return;
+                if (pages.fail(page)) updateSearchStatus();
+            }
+        });
+    }
 
-                    @Override
-                    public void onFailure(Call<FnHttpApi.GalleryListResponse> call, Throwable t) {
-                        Log.e(TAG, "搜索失败", t);
-                        tvStatus.setText("搜索失败: " + t.getMessage());
-                    }
-                });
+    private void updateSearchStatus() {
+        tvStatus.setFocusable(pages.hasError());
+        tvStatus.setClickable(pages.hasError());
+        if (currentQuery.isEmpty()) tvStatus.setText("输入关键词开始搜索");
+        else if (pages.hasError()) tvStatus.setText("加载失败，按确定重试（已加载 " + searchResults.size() + " 项）");
+        else if (pages.isStalled()) tvStatus.setText("服务器返回重复页，已停止加载（已加载 " + searchResults.size() + " 项）");
+        else if (pages.isLoading()) tvStatus.setText(searchResults.isEmpty() ? "搜索中..." : "正在加载更多...");
+        else tvStatus.setText("已加载 " + searchResults.size() + " 个结果" + (pages.hasMore() ? "，下移加载更多" : ""));
+        if (detailCallback != null && !pages.isLoading()) {
+            MediaListHolder.PageCallback callback = detailCallback;
+            detailCallback = null;
+            if (pages.hasError()) callback.onFailure();
+            else callback.onLoaded(toMediaItems(), pages.hasMore());
+        }
+    }
+
+    @Override protected void onDestroy() {
+        destroyed = true;
+        pages.close();
+        searchHandler.removeCallbacksAndMessages(null);
+        if (searchCall != null) searchCall.cancel();
+        if (detailCallback != null) {
+            MediaListHolder.PageCallback callback = detailCallback;
+            detailCallback = null;
+            callback.onFailure();
+        }
+        if (rvResults != null) rvResults.setAdapter(null);
+        super.onDestroy();
     }
 
     private int dp(int value) {
@@ -289,6 +355,8 @@ public class SearchActivity extends FragmentActivity {
 
     // ========== Search Results Adapter ==========
     private class SearchAdapter extends RecyclerView.Adapter<SearchAdapter.ViewHolder> {
+        SearchAdapter() { setHasStableIds(true); }
+        @Override public long getItemId(int position) { return searchResults.get(position).id; }
 
         @Override
         public ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
@@ -304,6 +372,12 @@ public class SearchActivity extends FragmentActivity {
         public void onBindViewHolder(ViewHolder holder, int position) {
             FnHttpApi.GalleryPhoto photo = searchResults.get(position);
             holder.bind(photo, position);
+            if (position >= searchResults.size() - 12) rvResults.post(() -> loadSearchPage(false));
+        }
+
+        @Override public void onViewRecycled(ViewHolder holder) {
+            CachedImageLoader.clear(holder.ivPhoto);
+            super.onViewRecycled(holder);
         }
 
         @Override
@@ -331,55 +405,60 @@ public class SearchActivity extends FragmentActivity {
             }
 
             void bind(FnHttpApi.GalleryPhoto photo, int position) {
-                String thumbUrl = null;
-                if (photo.additional != null && photo.additional.thumbnail != null) {
-                    String path = photo.additional.thumbnail.sUrl;
-                    if (path != null) {
-                        thumbUrl = path.startsWith("http") ? path : baseUrl + path;
-                    }
-                }
-
-                if (thumbUrl != null) {
-                    final String url = thumbUrl;
-                    CachedImageLoader.loadIntoImageView(ivPhoto, url, token);
-                }
-
-                // Show video indicator
-                if ("video".equals(photo.category)) {
-                    ivPhoto.setBackgroundColor(Color.parseColor("#44000000"));
-                }
+                CachedImageLoader.loadIntoImageView(ivPhoto, mediaItems.get(position).getThumbnailUrl(), token);
+                ivPhoto.setBackgroundColor(Color.parseColor("video".equals(photo.category) ? "#44000000" : "#333333"));
             }
         }
     }
 
-    private void openMediaDetail(int position) {
-        FnHttpApi.GalleryPhoto photo = searchResults.get(position);
-        List<MediaItem> mediaItems = new ArrayList<>();
+    private List<MediaItem> toMediaItems() {
+        return new ArrayList<>(mediaItems);
+    }
 
+    private static MediaItem toMediaItem(FnHttpApi.GalleryPhoto photo, String baseUrl) {
         String thumbUrl = null;
-        String mediaUrl = null;
+        String mediaUrl = "video".equals(photo.category) ? baseUrl + "/p/api/v1/stream/v/" + photo.id : null;
         if (photo.additional != null && photo.additional.thumbnail != null) {
             FnHttpApi.GalleryThumbnail thumb = photo.additional.thumbnail;
-            thumbUrl = thumb.sUrl != null ? baseUrl + thumb.sUrl : null;
-            if ("video".equals(photo.category)) {
-                mediaUrl = baseUrl + "/p/api/v1/stream/v/" + photo.id;
-            } else {
-                mediaUrl = thumb.originalUrl != null ? baseUrl + thumb.originalUrl : (thumb.mUrl != null ? baseUrl + thumb.mUrl : null);
+            thumbUrl = resolveUrl(baseUrl, thumb.sUrl != null ? thumb.sUrl : thumb.mUrl);
+            if (!"video".equals(photo.category)) {
+                mediaUrl = resolveUrl(baseUrl, thumb.originalUrl != null ? thumb.originalUrl : thumb.mUrl);
             }
         }
+        return new MediaItem(String.valueOf(photo.id), photo.fileName, photo.category, thumbUrl, mediaUrl);
+    }
 
-        MediaItem item = new MediaItem(
-                String.valueOf(photo.id),
-                photo.fileName,
-                photo.category,
-                thumbUrl,
-                mediaUrl
-        );
-        mediaItems.add(item);
+    private static String resolveUrl(String baseUrl, String url) {
+        return url == null || url.isEmpty() ? null : url.startsWith("http") ? url : baseUrl + url;
+    }
 
-        MediaListHolder.set(mediaItems);
+    private void openMediaDetail(int position) {
+        final Object generation = dataGeneration;
+        MediaListHolder.set(toMediaItems(), new MediaListHolder.PageSource() {
+            private final GridPageState.Delivery delivery = new GridPageState.Delivery(mediaItems.size());
+            @Override public boolean hasMore() {
+                return !(destroyed || generation != dataGeneration) && delivery.hasMore(mediaItems.size(), pages.hasMore());
+            }
+            @Override public void loadMore(MediaListHolder.PageCallback callback) {
+                if (destroyed || generation != dataGeneration) { callback.onFailure(); return; }
+                if (delivery.hasBuffered(mediaItems.size()) || !pages.hasMore()) {
+                    delivery.delivered(mediaItems.size());
+                    callback.onLoaded(toMediaItems(), pages.hasMore());
+                    return;
+                }
+                if (detailCallback != null) { callback.onFailure(); return; }
+                detailCallback = new MediaListHolder.PageCallback() {
+                    @Override public void onLoaded(List<MediaItem> items, boolean hasMore) {
+                        delivery.delivered(items.size());
+                        callback.onLoaded(items, hasMore);
+                    }
+                    @Override public void onFailure() { callback.onFailure(); }
+                };
+                if (!pages.isLoading()) loadSearchPage(true);
+            }
+        });
         Intent intent = new Intent(this, MediaDetailActivity.class);
-        intent.putExtra("CURRENT_INDEX", 0);
+        intent.putExtra("CURRENT_INDEX", position);
         startActivity(intent);
     }
 }

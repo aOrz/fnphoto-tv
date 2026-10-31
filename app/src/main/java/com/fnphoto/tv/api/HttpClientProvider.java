@@ -9,7 +9,7 @@ import okhttp3.OkHttpClient;
 public class HttpClientProvider {
     private static OkHttpClient client;
 
-    public static OkHttpClient getClient(Context context) {
+    public static synchronized OkHttpClient getClient(Context context) {
         if (client == null) {
             client = TlsUtils.enableTlsOnApi19(new OkHttpClient.Builder())
                 .connectTimeout(15, TimeUnit.SECONDS)
