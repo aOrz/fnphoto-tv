@@ -103,3 +103,43 @@ Device regression (synthetic NAS only, 2026-10-31):
 
 No live NAS, live FN Connect relocation, physical-TV decode/performance, or
 end-to-end Shared/Tags/Smart Classification behavior is claimed as verified.
+
+## Video failure recovery follow-up
+
+A later TV regression found that HTTP 404 incorrectly switched from ExoPlayer
+into a platform MediaPlayer attempt, adding about 32 seconds of waiting before
+leaving a black screen and transient toast. The follow-up distinguishes source
+failures from decoder compatibility failures:
+
+- HTTP responses stop Exo's automatic retry and never trigger another decoder.
+  Network, TLS, timeout and unknown failures also do not trigger platform fallback.
+  Parser/renderer/known initialization compatibility failures may try the platform
+  player once. The policy uses the actual ExoPlayer 2.11.8 exception API.
+- A persistent error panel gives an actionable reason and a focused **Retry**
+  button. The remote's confirm/play key retries; left/right selects other media;
+  Back exits. No exception body, URL or token is included in the user message.
+- Each retry/navigation/exit invalidates old callbacks and releases players and
+  timers. Error state survives backgrounding and saved-state recreation without
+  issuing an automatic new video request. Startup/buffering waits are bounded to
+  15 seconds before presenting the same retry UI.
+- Local regression: 182 JVM tests (including 10 new failure-policy checks),
+  14 mock contract tests, debug build and lint pass (0 errors / 88 warnings).
+  These checks alone do not establish real-NAS or physical-TV compatibility.
+
+TV API 29 synthetic-NAS revalidation for this follow-up used APK
+`9bf8247d8724cdb6ff4d5b1f43e740e137125e95b2ea0c09d7d5d31e72ff9e32`:
+HTTP 404 produced one Exo request, no platform-player request, and a persistent
+error panel in roughly half a second. Backgrounding and returning retained the
+error without another stream request. Restoring the same endpoint and pressing
+the TV confirm key played actual moving video; pause held identical pixels across
+4.165 seconds and resume advanced the timecode. A separate normal video played,
+and Back released its codec client. HTTP 200 with invalid MP4 bytes still tried
+one format-compatibility fallback, then displayed a persistent error rather than
+a black screen. This follow-up was not rerun on API 19 or a real NAS/physical TV.
+
+Cancellation was also checked on-device: while the format fallback was preparing,
+Right selected another video; its preview remained unchanged after 17 seconds
+(longer than the old attempt's deadline), with no stale error panel. That video
+then played to a visible 2-second timecode and exited normally. Error-page
+process-death recreation was not separately exercised in this follow-up; only
+background/foreground error preservation was tested on-device.
