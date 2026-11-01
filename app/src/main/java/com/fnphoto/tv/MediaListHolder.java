@@ -10,6 +10,15 @@ public class MediaListHolder {
     /** The list screen owns paging; detail screens request a page only at its loaded boundary. */
     public interface PageSource {
         boolean hasMore();
+        /** Sliding sources deliver replacement snapshots, retaining the requested anchor ID. */
+        default boolean isWindowed() { return false; }
+        /** Pin the currently displayed stable ID before a directional window request. */
+        default void setAnchorId(String id) { }
+        default void setAnchor(MediaItem item) { setAnchorId(item.getId()); }
+        /** Return the exact displayed model even if its owner window has already moved. */
+        default void onReturn(MediaItem item) { }
+        default boolean hasPrevious() { return false; }
+        default void loadPrevious(PageCallback callback) { callback.onFailure(); }
         void loadMore(PageCallback callback);
         /** A window/protocol boundary must not be presented as the end of the library. */
         default String getBoundaryMessage() { return null; }

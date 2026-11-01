@@ -61,7 +61,7 @@
 | 焦点、卡片复用 | `FocusImageCardView`、`CardPresenter`、`MainFragment.focusBrowseContent`、`item_photo_grid.xml`；另做设备 QA |
 | 空/加载/错误状态 | `TvStateView`、`BrowseStatus`、`GridScreenState` 及同名状态测试；设备 `EmptyStateDeviceTest`，见 [TV 列表状态](../empty-states.md) |
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
-| 主列表分页/取消 | `MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget`、`PhotoPageDemand` 及同名 Test |
+| 主列表分页/取消 | `SlidingPhotoWindow`、`MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget`、`PhotoPageDemand` 及同名 Test |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |
 | 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPreloadScope`、`DetailPlaybackState`、`DetailSessionStore`；`VideoRemoteInput`、`VideoSeekState`、`VideoControls`；`MediaDetailLifecycleTest`、`DetailPreloadScopeTest`、`player/*Test`，设备测试 `VideoRemoteInstrumentationTest` |
 | 图片生命周期 | `cache/CachedImageLoader`、`ImageRequestScope`、`ImageCacheManager`；`ImagePipelineTest` |
@@ -79,9 +79,12 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 新进入普通/共享相册等分页照片墙时，首次有效内容从首张开始，详情返回和分页追加保留位置；
 `PhotoWallDeviceTest` 覆盖非首行相册进入、重进、详情、分页和加载中断。
 分页照片墙在靠近页尾或实际聚焦底部状态卡时请求下一页，完成后重新检查需求；
-底部交接到新增照片前重新核对实际焦点和页面代数。底部状态由 `PageFooterPresenter`
+底部交接到新增照片前重新核对实际焦点和页面代数。主照片墙采用 560 原始行/16 页双向滑动窗口；行适配器、索引和详情快照随淘汰释放，
+按原始 offset 重取旧内容而非保留全图库书签。详情前后导航与 Back 按媒体 ID 重新定位，
+屏幕/详情快照最多 561 项（含稀疏锚点），不是全局随机跳转或离线图库。其他目录、搜索、
+文件夹及未分页结果仍保留原 1,200 项限制。底部状态由 `PageFooterPresenter`
 显示无图片、无固定“加载状态”标题的文字条，终止与加载/重试仍明确区分。一次自动需求最多请求五个原始页，
-失败、稀疏暂停和窗口边界仍需明确操作，设备场景见 QA 清单 A15–A18。
+失败、稀疏暂停仍需明确操作，主照片墙不再通过“下一批”丢弃整窗，设备场景见 QA 清单 A15–A18。
 
 ## 已有文档的用途与冲突处理
 

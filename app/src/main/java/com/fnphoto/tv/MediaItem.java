@@ -5,6 +5,10 @@ import java.util.List;
 
 public class MediaItem implements Serializable {
     private String id;
+    // Query-local raw coordinate, never a global library index or persisted cursor.
+    private transient int browseRawOffset = -1;
+    int getBrowseRawOffset() { return browseRawOffset; }
+    void setBrowseRawOffset(int offset) { browseRawOffset = offset; }
     private String title;
     private String type; // "photo", "video", "date", "folder", "album"
     private String thumbnailUrl;

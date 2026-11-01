@@ -299,6 +299,109 @@ public class PhotoWallDeviceTest {
         checkAlbumEntry(true);
     }
 
+    @Test public void virtualWallTraversesBeyond1200AndReloadsEvictedPhotos() throws Exception {
+        fixture.albumCount = 2400;
+        openAlbumDirectory(false);
+        selectLateAlbum();
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        awaitFirstPhoto(35);
+        awaitFocusedSyntheticImage();
+        recordMemory("start");
+        while (onMain(() -> Integer.parseInt(media().get(media().size() - 1).getId())) < 1800) {
+            final String last = onMain(() -> media().get(media().size() - 1).getId());
+            onMain(() -> {
+                int index = media().size() - 1;
+                select(index / layout().columns, index % layout().columns);
+                return null;
+            });
+            await(() -> !last.equals(media().get(media().size() - 1).getId())
+                    && !((MainPagingState) field(fragment(), "photoPaging")).isLoading());
+            awaitFocusedSyntheticImage();
+            onMain(() -> {
+                assertTrue("Metadata window stays bounded", media().size() <= 560);
+                assertTrue("Index stays bounded", ((Map<?, ?>) field(fragment(), "photoPositions")).size() <= 560);
+                assertTrue("Leanback adapters stay bounded", rows().size() <= 560 / layout().columns + 2);
+                return null;
+            });
+        }
+        await(() -> "photo".equals(focusedTag(R.id.media_item_type)));
+        awaitFocusedSyntheticImage();
+        screenshot("virtual-wall-beyond-1800");
+        recordMemory("beyond1800");
+        // Cross the loaded tail through the real detail Activity, then return to
+        // its stable ID rather than a stale relative row/column.
+        final String tail = onMain(() -> media().get(media().size() - 1).getId());
+        onMain(() -> {
+            int index = media().size() - 1;
+            select(index / layout().columns, index % layout().columns);
+            return null;
+        });
+        await(() -> tail.equals(focusedTag(R.id.media_item_id)));
+        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(
+                MediaDetailActivity.class.getName(), null, false);
+        try {
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            extraActivity = instrumentation.waitForMonitorWithTimeout(monitor, 30000);
+            assertNotNull("Virtual window opens detail", extraActivity);
+            await(() -> Boolean.TRUE.equals(field(extraActivity, "canSwitch")));
+            key(KeyEvent.KEYCODE_DPAD_RIGHT);
+            final String nextId = String.valueOf(Integer.parseInt(tail) + 1);
+            await(() -> nextId.equals(field(extraActivity, "displayedMediaId")));
+            assertTrue(onMain(() -> ((List<?>) field(extraActivity, "mediaList")).size() <= 561));
+            key(KeyEvent.KEYCODE_BACK);
+            await(() -> activity.hasWindowFocus() && nextId.equals(focusedTag(R.id.media_item_id)));
+            extraActivity = null;
+        } finally { instrumentation.removeMonitor(monitor); }
+        assertTrue(onMain(() -> Integer.parseInt(media().get(0).getId()) > 1));
+        while (onMain(() -> Integer.parseInt(media().get(0).getId())) > 1) {
+            final String first = onMain(() -> media().get(0).getId());
+            onMain(() -> { select(0, 0); return null; });
+            await(() -> first.equals(focusedTag(R.id.media_item_id)));
+            key(KeyEvent.KEYCODE_DPAD_UP);
+            await(() -> !first.equals(media().get(0).getId())
+                    && !((MainPagingState) field(fragment(), "photoPaging")).isLoading());
+            assertTrue(onMain(() -> media().size() <= 560));
+        }
+        onMain(() -> { select(0, 0); return null; });
+        await(() -> "1".equals(focusedTag(R.id.media_item_id)));
+        awaitFocusedSyntheticImage();
+        screenshot("virtual-wall-returned-first");
+        recordMemory("returnedFirst");
+    }
+
+    /** A gallery placeholder must never count as decoded-image/focus evidence. */
+    private void awaitFocusedSyntheticImage() throws Exception {
+        await(() -> {
+            View focused = activity.getCurrentFocus();
+            while (focused != null && !(focused instanceof androidx.leanback.widget.ImageCardView))
+                focused = focused.getParent() instanceof View ? (View) focused.getParent() : null;
+            if (focused == null) return false;
+            android.graphics.drawable.Drawable drawable =
+                    ((androidx.leanback.widget.ImageCardView) focused).getMainImageView().getDrawable();
+            if (!(drawable instanceof android.graphics.drawable.BitmapDrawable)) return false;
+            Bitmap source = ((android.graphics.drawable.BitmapDrawable) drawable).getBitmap();
+            Bitmap readable = source;
+            if (Build.VERSION.SDK_INT >= 26 && source.getConfig() == Bitmap.Config.HARDWARE)
+                readable = source.copy(Bitmap.Config.ARGB_8888, false);
+            try {
+                int color = readable.getPixel(Math.min(10, readable.getWidth() - 1),
+                        Math.min(10, readable.getHeight() - 1));
+                return Color.blue(color) > Color.red(color) + 40
+                        && Color.green(color) > Color.red(color) + 20;
+            } finally { if (readable != source) readable.recycle(); }
+        });
+    }
+
+    private void recordMemory(String phase) throws Exception {
+        android.os.Debug.MemoryInfo memory = new android.os.Debug.MemoryInfo();
+        android.os.Debug.getMemoryInfo(memory);
+        android.util.Log.i("VirtualWallEvidence", phase + " pssKiB=" + memory.getTotalPss()
+                + " javaUsed=" + (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory())
+                + " nativeAllocated=" + android.os.Debug.getNativeHeapAllocatedSize()
+                + " imageResponses=" + fixture.imageResponses.get()
+                + " retained=" + onMain(() -> media().size()));
+    }
+
     private void checkAlbumEntry(boolean shared) throws Exception {
         openAlbumDirectory(shared);
         selectLateAlbum();
@@ -563,6 +666,8 @@ public class PhotoWallDeviceTest {
 
     /** No auth or remote NAS: a loopback-only deterministic 33-date / 70-photo fixture. */
     private static final class Fixture implements AutoCloseable {
+        volatile int albumCount = 70;
+        final AtomicInteger imageResponses = new AtomicInteger();
         final ServerSocket server;
         final AtomicInteger albumRequests = new AtomicInteger();
         final AtomicInteger albumResponses = new AtomicInteger();
@@ -602,7 +707,7 @@ public class PhotoWallDeviceTest {
                 byte[] body;
                 String type = "application/json";
                 if (target.startsWith("/image") || target.startsWith("/p/api/v1/stream/p/")) {
-                    body = image; type = "image/jpeg";
+                    body = image; type = "image/jpeg"; imageResponses.incrementAndGet();
                 }
                 else if (target.startsWith("/p/api/v1/gallery/timeline")) {
                     StringBuilder days = new StringBuilder();
@@ -633,7 +738,7 @@ public class PhotoWallDeviceTest {
                     int limit = target.startsWith("/p/api/v1/album/normal/getList") ? 50 : 35;
                     body = ("error".equals(albumMode) ? "{\"code\":500}"
                             : "empty".equals(albumMode) ? photos(0, 0, false)
-                            : photos(start, Math.min(limit, 70 - start), start + limit < 70)).getBytes("UTF-8");
+                            : photos(start, Math.min(limit, albumCount - start), start + limit < albumCount)).getBytes("UTF-8");
                 } else if (target.startsWith("/p/api/v1/photo/search")
                         || target.startsWith("/p/api/v1/folder_view/getFileList")) {
                     body = photos(0, 70, false).getBytes("UTF-8");
@@ -658,7 +763,7 @@ public class PhotoWallDeviceTest {
                         .append("\",\"photoUUID\":\"synthetic\",\"additional\":{\"thumbnail\":{\"mUrl\":\"/image/")
                         .append(i).append(".jpg\",\"sUrl\":\"/image/").append(i).append(".jpg\"}}}");
             }
-            return "{\"code\":0,\"data\":{\"total\":70,\"count\":" + count + ",\"hasNext\":" + more
+            return "{\"code\":0,\"data\":{\"total\":" + albumCount + ",\"count\":" + count + ",\"hasNext\":" + more
                     + ",\"list\":[" + items + "]}}";
         }
         @Override public void close() throws Exception { if (albumGate != null) albumGate.countDown(); server.close(); }

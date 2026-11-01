@@ -27,7 +27,11 @@ final class MainPagingState {
     private boolean failed;
     private boolean stalled;
 
-    MainPagingState(int pageSize) {
+    MainPagingState(int pageSize) { this(pageSize, 0); }
+
+    MainPagingState(int pageSize, int initialOffset) {
+        if (initialOffset < 0) throw new IllegalArgumentException("initialOffset");
+        offset = initialOffset;
         if (pageSize <= 0) throw new IllegalArgumentException("pageSize must be positive");
         this.pageSize = pageSize;
         ids = new LinkedHashMap<String, Boolean>(16, 0.75f, true) {
