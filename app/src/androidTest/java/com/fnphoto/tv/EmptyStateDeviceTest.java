@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -402,6 +403,50 @@ public class EmptyStateDeviceTest {
         await(search::isFinishing);
     }
 
+    @Test public void searchWindowReturnHidesKeyboardAndKeepsQuery() throws Exception {
+        assumeTrue("IME visibility diagnostic needs API21+", Build.VERSION.SDK_INT >= 21);
+        final SearchActivity search = startSearch();
+        final EditText input = ui(() -> (EditText) field(search, "editSearch"));
+        fixture.respond(SEARCH, 503, "{\"code\":503}");
+        ui(() -> { input.setText("synthetic-window-return"); return null; });
+        await(() -> title(search).equals("搜索失败"));
+        final Rect browseFrame = ui(() -> visibleFrame(search));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        awaitImeShown(true);
+        awaitImeFrame(true, search, browseFrame);
+        // A controlled same-app window handoff; this is not a process-death or Home test.
+        final Activity cover = instrumentation.startActivitySync(new Intent(
+                instrumentation.getTargetContext(), SettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        try {
+            await(cover::hasWindowFocus);
+            ui(() -> { cover.finish(); return null; });
+            await(search::hasWindowFocus);
+            awaitImeShown(false);
+            awaitImeFrame(false, search, browseFrame);
+            awaitKeyboardBrowse(search, browseFrame);
+            assertEquals("Window return must preserve the query", "synthetic-window-return",
+                    ui(() -> input.getText().toString()));
+            assertTrue("Window return keeps the editor selected without reopening IME", ui(input::hasFocus));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            await(() -> action(search).hasFocus());
+            screenshot("search-window-return-remote-retry");
+            key(KeyEvent.KEYCODE_DPAD_UP);
+            await(input::hasFocus);
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            awaitImeShown(true);
+            awaitImeFrame(true, search, browseFrame);
+            key(KeyEvent.KEYCODE_BACK);
+            awaitImeShown(false);
+            awaitImeFrame(false, search, browseFrame);
+            awaitKeyboardBrowse(search, browseFrame);
+            key(KeyEvent.KEYCODE_BACK);
+            await(search::isFinishing);
+        } finally {
+            ui(() -> { cover.finish(); return null; });
+        }
+    }
+
     private void awaitImeFrame(boolean expected, SearchActivity search, Rect browseFrame) throws Exception {
         // On this dedicated docked-TV-IME fixture, shown=true is only a request flag. The
         // window frame must actually shrink/restore too; screenshots provide pixel evidence.
@@ -492,6 +537,10 @@ public class EmptyStateDeviceTest {
         extraActivity = instrumentation.startActivitySync(new Intent(instrumentation.getTargetContext(), SearchActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         await(extraActivity::hasWindowFocus);
+        assertEquals("Search starts in remote browsing, not automatic IME editing",
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN,
+                (int) ui(() -> extraActivity.getWindow().getAttributes().softInputMode
+                        & WindowManager.LayoutParams.SOFT_INPUT_MASK_STATE));
         return (SearchActivity) extraActivity;
     }
 

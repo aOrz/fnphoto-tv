@@ -59,6 +59,6 @@
         <activity
             android:name=".SearchActivity"
             android:screenOrientation="landscape"
-            android:windowSoftInputMode="adjustResize" />
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
     </application>
 </manifest>

@@ -44,7 +44,8 @@
    搜索输入框在控件按键监听器中处理下移，保证错误/重试/结果可达，避免被 EditText
    光标移动提前消费；浏览遥控键另在 pre-IME 阶段绕过隐藏输入法，`SearchKeyboardState`
    固定键对归属，输入框完整消费开键盘确认键对，布局观察同步显隐；显式/可见键盘仍
-   拥有编辑键。设备注入的 DOWN/UP 必须共用 downTime；验证见同名状态测试、`EmptyStateDeviceTest`
+   拥有编辑键。搜索窗口首次进入/返回默认隐藏键盘（`stateAlwaysHidden`），明确确定键仍可打开。
+   设备注入的 DOWN/UP 必须共用 downTime；验证见同名状态测试、`EmptyStateDeviceTest`
    与 [TV 列表状态](../empty-states.md)。
 5. 列表用 [MediaListHolder](../../app/src/main/java/com/fnphoto/tv/MediaListHolder.java)
    做进程内交接，向 [MediaDetailActivity](../../app/src/main/java/com/fnphoto/tv/MediaDetailActivity.java)
@@ -75,6 +76,8 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 日期预览持续滚动时按最新焦点节流派发，拼图逐张显示；详情的缩略图可见状态与主图完成
 分开，预取成为当前图时保留到主图请求结束。实现边界见
 [图片、缓存与视频](constraints.md#图片缓存与视频)，行为说明见 [加载说明](../performance.md)。
+新进入普通/共享相册等分页照片墙时，首次有效内容从首张开始，详情返回和分页追加保留位置；
+`PhotoWallDeviceTest` 覆盖非首行相册进入、重进、详情、分页和加载中断。
 分页照片墙在靠近页尾或实际聚焦底部状态卡时请求下一页，完成后重新检查需求；
 底部交接到新增照片前重新核对实际焦点和页面代数。一次自动需求最多请求五个原始页，
 失败、稀疏暂停和窗口边界仍需明确操作，设备场景见 QA 清单 A15–A18。

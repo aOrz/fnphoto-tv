@@ -22,6 +22,11 @@
 固定归同一端，避免键盘恰好显隐时丢失确认键或拆分 Back。窗口失焦清除未完成键序列。
 此逻辑仅作用于搜索页，不改变结果加载、offset 或重试次数。
 
+搜索窗口声明 `stateAlwaysHidden|adjustResize`：首次进入和从其他窗口返回时默认浏览，
+不让 `stateUnspecified` 的系统自动弹出与遥控下移竞争；查询和输入框选择保留。
+这不是永久禁用键盘，窗口已获焦后用户仍可明确按确定/点击打开。
+语义见 [WindowManager.LayoutParams](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#SOFT_INPUT_STATE_ALWAYS_HIDDEN)。
+
 输入框用于打开键盘的确定/Enter 完整消费 DOWN/重复/UP，只在匹配且未取消的 UP
 打开，避免只消费 UP、让另一半继续进入其他编辑/输入法分发路径；不猜测特定 IME 的内部实现。
 用户明确按确定/点击时以 `showSoftInput(..., 0)` 正常请求键盘，不用可被忽略的
@@ -77,7 +82,8 @@
 这不是浮动/overlay IME 的覆盖；不修改设备输入法设置，也不在测试中重置键盘状态。验证
 确定打开时查询不变、键盘方向选择、Back 收起和恢复重试焦点；隐藏验证同时等待
 系统状态、窗口可见 frame 和浏览按键归属恢复，不将隐藏动画开始当作动画结束。
-Search 动作部分调用实际 editor
+窗口返回用例用同应用设置页覆盖再返回搜索，检查查询保留、键盘收起、重试可达及再次打开；
+这不等同 Home、进程死亡或所有窗口/厂商输入法的覆盖。Search 动作部分调用实际 editor
 回调验证收起接线，不声称覆盖各厂商键盘的 Search 按钮布局。
 仅在专用合成模拟器运行：
 
