@@ -305,6 +305,7 @@ public class PhotoWallDeviceTest {
         selectLateAlbum();
         key(KeyEvent.KEYCODE_DPAD_CENTER);
         awaitFirstPhoto(35);
+        awaitFocusedSyntheticImage();
         recordMemory("start");
         while (onMain(() -> Integer.parseInt(media().get(media().size() - 1).getId())) < 1800) {
             final String last = onMain(() -> media().get(media().size() - 1).getId());
@@ -315,6 +316,7 @@ public class PhotoWallDeviceTest {
             });
             await(() -> !last.equals(media().get(media().size() - 1).getId())
                     && !((MainPagingState) field(fragment(), "photoPaging")).isLoading());
+            awaitFocusedSyntheticImage();
             onMain(() -> {
                 assertTrue("Metadata window stays bounded", media().size() <= 560);
                 assertTrue("Index stays bounded", ((Map<?, ?>) field(fragment(), "photoPositions")).size() <= 560);
@@ -323,6 +325,7 @@ public class PhotoWallDeviceTest {
             });
         }
         await(() -> "photo".equals(focusedTag(R.id.media_item_type)));
+        awaitFocusedSyntheticImage();
         screenshot("virtual-wall-beyond-1800");
         recordMemory("beyond1800");
         // Cross the loaded tail through the real detail Activity, then return to
@@ -361,8 +364,32 @@ public class PhotoWallDeviceTest {
         }
         onMain(() -> { select(0, 0); return null; });
         await(() -> "1".equals(focusedTag(R.id.media_item_id)));
+        awaitFocusedSyntheticImage();
         screenshot("virtual-wall-returned-first");
         recordMemory("returnedFirst");
+    }
+
+    /** A gallery placeholder must never count as decoded-image/focus evidence. */
+    private void awaitFocusedSyntheticImage() throws Exception {
+        await(() -> {
+            View focused = activity.getCurrentFocus();
+            while (focused != null && !(focused instanceof androidx.leanback.widget.ImageCardView))
+                focused = focused.getParent() instanceof View ? (View) focused.getParent() : null;
+            if (focused == null) return false;
+            android.graphics.drawable.Drawable drawable =
+                    ((androidx.leanback.widget.ImageCardView) focused).getMainImageView().getDrawable();
+            if (!(drawable instanceof android.graphics.drawable.BitmapDrawable)) return false;
+            Bitmap source = ((android.graphics.drawable.BitmapDrawable) drawable).getBitmap();
+            Bitmap readable = source;
+            if (Build.VERSION.SDK_INT >= 26 && source.getConfig() == Bitmap.Config.HARDWARE)
+                readable = source.copy(Bitmap.Config.ARGB_8888, false);
+            try {
+                int color = readable.getPixel(Math.min(10, readable.getWidth() - 1),
+                        Math.min(10, readable.getHeight() - 1));
+                return Color.blue(color) > Color.red(color) + 40
+                        && Color.green(color) > Color.red(color) + 20;
+            } finally { if (readable != source) readable.recycle(); }
+        });
     }
 
     private void recordMemory(String phase) throws Exception {
@@ -371,6 +398,7 @@ public class PhotoWallDeviceTest {
         android.util.Log.i("VirtualWallEvidence", phase + " pssKiB=" + memory.getTotalPss()
                 + " javaUsed=" + (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory())
                 + " nativeAllocated=" + android.os.Debug.getNativeHeapAllocatedSize()
+                + " imageResponses=" + fixture.imageResponses.get()
                 + " retained=" + onMain(() -> media().size()));
     }
 
@@ -639,6 +667,7 @@ public class PhotoWallDeviceTest {
     /** No auth or remote NAS: a loopback-only deterministic 33-date / 70-photo fixture. */
     private static final class Fixture implements AutoCloseable {
         volatile int albumCount = 70;
+        final AtomicInteger imageResponses = new AtomicInteger();
         final ServerSocket server;
         final AtomicInteger albumRequests = new AtomicInteger();
         final AtomicInteger albumResponses = new AtomicInteger();
@@ -678,7 +707,7 @@ public class PhotoWallDeviceTest {
                 byte[] body;
                 String type = "application/json";
                 if (target.startsWith("/image") || target.startsWith("/p/api/v1/stream/p/")) {
-                    body = image; type = "image/jpeg";
+                    body = image; type = "image/jpeg"; imageResponses.incrementAndGet();
                 }
                 else if (target.startsWith("/p/api/v1/gallery/timeline")) {
                     StringBuilder days = new StringBuilder();
