@@ -21,7 +21,11 @@ final class SharedAlbumSupport {
     }
 
     static String contentQuery(int albumId, int offset) {
-        return "albumId=" + albumId + "&endTime=" + END_TIME + "&limit=" + MEDIA_PAGE_SIZE
+        return contentQuery(albumId, offset, MEDIA_PAGE_SIZE);
+    }
+
+    static String contentQuery(int albumId, int offset, int limit) {
+        return "albumId=" + albumId + "&endTime=" + END_TIME + "&limit=" + limit
                 + "&offset=" + offset + "&sortDirection=desc&startTime=" + START_TIME;
     }
 

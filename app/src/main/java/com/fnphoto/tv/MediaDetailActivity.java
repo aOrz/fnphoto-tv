@@ -118,6 +118,7 @@ public class MediaDetailActivity extends FragmentActivity {
 
     private List<MediaItem> mediaList;
     private int currentIndex;
+    private String displayedMediaId;
     private Handler debounceHandler = new Handler(Looper.getMainLooper());
     private Handler slideshowHandler = new Handler(Looper.getMainLooper());
     private final Handler playbackHandler = new Handler(Looper.getMainLooper());
@@ -182,6 +183,9 @@ public class MediaDetailActivity extends FragmentActivity {
             return;
         }
         currentIndex = Math.max(0, Math.min(currentIndex, mediaList.size() - 1));
+        displayedMediaId = savedInstanceState != null ? savedInstanceState.getString("DETAIL_MEDIA_ID") : null;
+        reconcileMediaIndex();
+        displayedMediaId = mediaList.get(currentIndex).getId();
         if (restoredWithoutPaging) Toast.makeText(this,
                 "已恢复已加载照片；更多照片请返回列表加载", Toast.LENGTH_LONG).show();
 
@@ -204,10 +208,18 @@ public class MediaDetailActivity extends FragmentActivity {
         }
     }
 
+    /** Window replacement changes indices, never the identity of the displayed item. */
+    private void reconcileMediaIndex() {
+        if (pageController == null) return;
+        int resolved = pageController.indexOfId(displayedMediaId);
+        if (resolved >= 0) currentIndex = resolved;
+    }
+
     private void showCurrentMedia() {
         if (currentIndex < 0 || currentIndex >= mediaList.size()) return;
 
         MediaItem item = mediaList.get(currentIndex);
+        displayedMediaId = item.getId();
         slideshowHandler.removeCallbacks(slideshowRunnable);
         currentPhotoReady = false;
         Log.d(TAG, "Showing media: " + item.getTitle() + " type: " + item.getType());
@@ -308,6 +320,7 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void preloadAdjacentPhotos() {
+        reconcileMediaIndex();
         // One bounded, lower-priority photo ahead. Never fetch a video as an image.
         if (mediaList == null || currentIndex + 1 >= mediaList.size()) return;
         MediaItem item = mediaList.get(currentIndex + 1);
@@ -853,58 +866,75 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void switchToPrevious() {
-        if (!canSwitch || slideshowActive) return;
+        if (!canSwitch || slideshowActive || (pageController != null && pageController.isLoading())) return;
+        reconcileMediaIndex();
         if (currentIndex > 0) {
             currentIndex--;
             showCurrentMedia();
             debounceSwitch();
+        } else if (pageController != null && pageController.hasPrevious()) {
+            requestNavigationPage(false);
         } else {
-            Toast.makeText(this, "已经是第一个", Toast.LENGTH_SHORT).show();
+            String boundary = pageController == null ? null : pageController.getBoundaryMessage();
+            Toast.makeText(this, boundary == null ? "已经是第一个" : boundary, Toast.LENGTH_LONG).show();
         }
     }
 
     private void switchToNext() {
-        if (!canSwitch && !slideshowActive) return;
+        if ((!canSwitch && !slideshowActive) || (pageController != null && pageController.isLoading())) return;
+        reconcileMediaIndex();
         if (currentIndex < mediaList.size() - 1) {
             currentIndex++;
             showCurrentMedia();
             if (!slideshowActive) debounceSwitch();
         } else if (pageController != null && pageController.hasMore()) {
-            if (pageController.isLoading()) return;
-            final long generation = loadState.current();
-            final long navigation = navigationState.current();
-            showLoading();
-            pageController.ensureNext(currentIndex, new MediaPageController.Callback() {
-                @Override public void onReady(boolean nextAvailable) {
-                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
-                    hideLoading();
-                    if (nextAvailable) switchToNext();
-                    else finishNavigation();
-                }
-                @Override public void onFailure() {
-                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
-                    hideLoading();
-                    if (slideshowActive) stopSlideshow();
-                    Toast.makeText(MediaDetailActivity.this, isVideoPlaying
-                            ? "加载下一页失败，请在操作栏选择下一项重试" : "加载下一页失败，按右键重试", Toast.LENGTH_LONG).show();
-                }
-                @Override public void onPaused(String message) {
-                    if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
-                    hideLoading();
-                    if (slideshowActive) stopSlideshow();
-                    Toast.makeText(MediaDetailActivity.this,
-                            message + (isVideoPlaying ? "；在操作栏选择下一项继续扫描或返回退出"
-                                    : "；按右键继续扫描或返回退出"), Toast.LENGTH_LONG).show();
-                }
-            });
+            requestNavigationPage(true);
         } else {
             finishNavigation();
         }
     }
 
+    private void requestNavigationPage(final boolean forward) {
+        final long generation = loadState.current();
+        final long navigation = navigationState.current();
+        showLoading();
+        MediaPageController.Callback callback = new MediaPageController.Callback() {
+            @Override public void onReady(boolean available) {
+                reconcileMediaIndex();
+                if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                hideLoading();
+                if (available) {
+                    if (forward) switchToNext(); else switchToPrevious();
+                } else if (forward) finishNavigation();
+                else Toast.makeText(MediaDetailActivity.this, "已经是第一个", Toast.LENGTH_SHORT).show();
+            }
+            @Override public void onFailure() {
+                reconcileMediaIndex();
+                if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                hideLoading();
+                if (slideshowActive) stopSlideshow();
+                Toast.makeText(MediaDetailActivity.this, forward
+                        ? (isVideoPlaying ? "加载下一页失败，请在操作栏选择下一项重试" : "加载下一页失败，按右键重试")
+                        : (isVideoPlaying ? "加载上一页失败，请在操作栏选择上一项重试" : "加载上一页失败，按左键重试"), Toast.LENGTH_LONG).show();
+            }
+            @Override public void onPaused(String message) {
+                reconcileMediaIndex();
+                if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
+                hideLoading();
+                if (slideshowActive) stopSlideshow();
+                Toast.makeText(MediaDetailActivity.this, message + (isVideoPlaying
+                        ? "；在操作栏选择" + (forward ? "下一项" : "上一项") + "继续扫描或返回退出"
+                        : "；按" + (forward ? "右键" : "左键") + "继续扫描或返回退出"), Toast.LENGTH_LONG).show();
+            }
+        };
+        if (forward) pageController.ensureNext(currentIndex, callback);
+        else pageController.ensurePrevious(currentIndex, callback);
+    }
+
     @Override public void finish() {
-        if (getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)
-                && mediaList != null && currentIndex >= 0 && currentIndex < mediaList.size()) {
+        reconcileMediaIndex();
+        if (mediaList != null && currentIndex >= 0 && currentIndex < mediaList.size()) {
+            if (pageController != null) pageController.returnToList(currentIndex);
             Intent result = new Intent();
             result.putExtra("LAST_MEDIA_ID", mediaList.get(currentIndex).getId());
             setResult(RESULT_OK, result);
@@ -1015,6 +1045,7 @@ public class MediaDetailActivity extends FragmentActivity {
             return;
         }
 
+        reconcileMediaIndex();
         MediaItem item = mediaList.get(currentIndex);
         int photoId;
         try {
@@ -1155,6 +1186,7 @@ public class MediaDetailActivity extends FragmentActivity {
             return;
         }
         if (collectPending || api == null || mediaList == null || mediaList.isEmpty()) return;
+        reconcileMediaIndex();
         final MediaItem item = mediaList.get(currentIndex);
         final int photoId;
         try { photoId = Integer.parseInt(item.getId()); }
@@ -1397,6 +1429,8 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     @Override protected void onSaveInstanceState(Bundle outState) {
+        reconcileMediaIndex();
+        outState.putString("DETAIL_MEDIA_ID", displayedMediaId);
         if (videoErrorMessage != null) outState.putString("VIDEO_ERROR_MESSAGE", videoErrorMessage);
         outState.putInt("DETAIL_INDEX", currentIndex);
         if (sessionStore != null && mediaList != null && !mediaList.isEmpty()) {
@@ -1407,7 +1441,7 @@ public class MediaDetailActivity extends FragmentActivity {
                     return;
                 }
                 sessionStore.save(sessionId, sessionOwner, mediaList,
-                        restoredWithoutPaging || pageController.hasMore()
+                        restoredWithoutPaging || pageController.hasMore() || pageController.hasPrevious()
                                 || pageController.getBoundaryMessage() != null, mediaSourceEndpoint);
                 outState.putString("DETAIL_SESSION", sessionId);
                 outState.putInt("DETAIL_INDEX", currentIndex);
@@ -1419,6 +1453,7 @@ public class MediaDetailActivity extends FragmentActivity {
     @Override
     protected void onStart() {
         super.onStart();
+        reconcileMediaIndex();
         if (reloadOnStart && mediaList != null && !mediaList.isEmpty()) {
             reloadOnStart = false;
             if (videoErrorMessage != null && "video".equals(mediaList.get(currentIndex).getType())) {

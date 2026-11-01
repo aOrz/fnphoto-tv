@@ -63,6 +63,15 @@ public class MainFragment extends BrowseSupportFragment {
     private int previewRequests;
     private int previewScreen; // 0: inactive, 1: timeline, 2: person timeline
     private MainPagingState photoPaging;
+    private SlidingPhotoWindow photoWindow;
+    private boolean loadingPreviousPhotos;
+    private boolean backwardPhotoNavigation;
+    private int previousScanRemaining;
+    private boolean previousRangeMatched;
+    private boolean previousScanPaused;
+    private String detailAnchorId;
+    private MediaItem detailAnchorItem;
+    private MediaItem pendingReturnedPhoto;
     private final SparseScanBudget photoScan = new SparseScanBudget(MetadataLimits.MAX_SCAN_PAGES);
     private final PhotoPageDemand photoPageDemand = new PhotoPageDemand(MetadataLimits.MAX_SCAN_PAGES);
     private boolean photoDemandCheckPosted;
@@ -305,6 +314,13 @@ public class MainFragment extends BrowseSupportFragment {
         if (albumPaging != null) albumPaging.cancel();
         if (sharedAlbumPaging != null) sharedAlbumPaging.cancel();
         photoPaging = null;
+        photoWindow = null;
+        loadingPreviousPhotos = false;
+        backwardPhotoNavigation = false;
+        previousScanPaused = false;
+        detailAnchorId = null;
+        detailAnchorItem = null;
+        pendingReturnedPhoto = null;
         photoScan.reset();
         photoPageDemand.reset();
         photoDemandCheckPosted = false;
@@ -504,7 +520,7 @@ public class MainFragment extends BrowseSupportFragment {
                                 .setPositiveButton("知道了", null).show();
                     } else if ("page_action".equals(mediaItem.getType())) {
                         if (photoPaging != null) {
-                            if (isWindowFull(photoPaging, currentMediaList.size())) nextPhotoWindow();
+                            if (loadingPreviousPhotos || previousScanPaused) loadPreviousPhotoPage(true);
                             else loadPhotoPage(true);
                         } else if (albumDirectory) {
                             if (isWindowFull(albumPaging, savedAlbumList.size())) nextAlbumWindow();
@@ -633,8 +649,8 @@ public class MainFragment extends BrowseSupportFragment {
             handoffPhotoPageFocus(handoff);
             return;
         }
-        if (!photoPaging.hasMore() || isWindowFull(photoPaging, currentMediaList.size())
-                || photoScan.isPaused()) return;
+        if (backwardPhotoNavigation || loadingPreviousPhotos || previousScanPaused
+                || !photoWindow.hasMore() || photoScan.isPaused()) return;
         if (photoPageDemand.shouldLoad(currentMediaList.size(), PREFETCH_DISTANCE)) loadPhotoPage();
     }
 
@@ -764,6 +780,27 @@ public class MainFragment extends BrowseSupportFragment {
             if (photoPageDemand.isPaused()) updatePageFooter(photoPaging, currentMediaList.size());
         }
         schedulePhotoDemandCheck();
+    }
+
+    /** At the virtual top edge UP loads the evicted range instead of escaping to the toolbar. */
+    void notePhotoWallDirection(int keyCode) {
+        if (focusedPhotoWallCard() == null) return;
+        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+            backwardPhotoNavigation = false;
+            preparePhotoDirection(false);
+        }
+    }
+
+    boolean handlePhotoWindowUp() {
+        if (photoWindow == null || !photoWindow.hasPrevious()) return false;
+        View card = focusedPhotoWallCard();
+        Integer position = card == null ? null : photoPositions.get(card.getTag(R.id.media_item_id));
+        if (position == null || position >= wallLayout.columns) return false;
+        backwardPhotoNavigation = true;
+        cancelPhotoFocusHandoff();
+        if (!photoPaging.isLoading()) loadPreviousPhotoPage(true);
+        return true;
     }
 
     /** Called before dispatching new user input; the input itself retains its normal handling. */
@@ -1792,6 +1829,7 @@ public class MainFragment extends BrowseSupportFragment {
         pagedTitle = title;
         photoPaging = new MainPagingState("shared_album".equals(mode)
                 ? SharedAlbumSupport.MEDIA_PAGE_SIZE : PHOTO_PAGE_SIZE);
+        photoWindow = new SlidingPhotoWindow(560, 16);
         currentMediaList = new ArrayList<>();
         photoPositions.clear();
         isPhotoListView = true;
@@ -1808,7 +1846,11 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void loadPhotoPage(boolean explicit) {
         if (photoPaging == null || photoPaging.isLoading() || applyingPage) return;
-        if (isWindowFull(photoPaging, currentMediaList.size())) {
+        if (loadingPreviousPhotos || previousScanPaused) {
+            loadPreviousPhotoPage(explicit);
+            return;
+        }
+        if (!photoWindow.hasMore()) {
             finishPhotoPage(true);
             return;
         }
@@ -1825,8 +1867,124 @@ public class MainFragment extends BrowseSupportFragment {
         requestPhotoPage();
     }
 
+    /** Rebase around an evicted anchor; never treat a raw gap as adjacent media. */
+    private void relocatePhotoWindow(MediaItem anchor, boolean previous) {
+        if (photoWindow == null || anchor == null || anchor.getBrowseRawOffset() < 0
+                || photoPaging.isLoading()) return;
+        photoWindow.reset(anchor.getBrowseRawOffset());
+        photoPaging = new MainPagingState(photoPageSize(), anchor.getBrowseRawOffset());
+        loadingPreviousPhotos = false;
+        previousScanPaused = false;
+        photoScan.reset();
+        photoPageDemand.reset();
+        currentMediaList = new ArrayList<>();
+        currentMediaList.add(anchor);
+        photoPositions.clear();
+        photoPositions.put(anchor.getId(), 0);
+        resetPagedRows();
+        appendPagedCard(anchor, 0);
+        updatePageFooter(photoPaging, 1);
+    }
+
+    private void restoreReturnedPhoto(MediaItem item) {
+        pendingReturnedPhoto = item;
+        applyPendingPhotoReturn();
+    }
+
+    private void applyPendingPhotoReturn() {
+        if (pendingReturnedPhoto == null || photoPaging == null || photoPaging.isLoading()) return;
+        MediaItem item = pendingReturnedPhoto;
+        pendingReturnedPhoto = null;
+        if (!photoPositions.containsKey(item.getId())) {
+            relocatePhotoWindow(item, false);
+            loadPhotoPage(true);
+        }
+        final String id = item.getId();
+        final long generation = requests.generation();
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation)) return;
+            Integer position = photoPositions.get(id);
+            if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
+        });
+    }
+
+    private void preparePhotoDirection(boolean previous) {
+        if (photoWindow == null || photoPaging == null || photoPaging.isLoading()) return;
+        if (!previous && (loadingPreviousPhotos || previousScanPaused || photoWindow.previousRequest() != null)) {
+            photoWindow.cancelPrevious();
+            loadingPreviousPhotos = false;
+            previousScanPaused = false;
+            photoPaging = new MainPagingState(photoPageSize(), photoWindow.nextOffset());
+            photoScan.reset();
+            photoPageDemand.reset();
+        }
+    }
+
+    private int photoPageSize() {
+        return "shared_album".equals(photoMode) ? SharedAlbumSupport.MEDIA_PAGE_SIZE : PHOTO_PAGE_SIZE;
+    }
+
+    private void loadPreviousPhotoPage(boolean explicit) {
+        if (photoWindow == null || photoPaging.isLoading() || applyingPage) return;
+        if (explicit) {
+            previousScanRemaining = MetadataLimits.MAX_SCAN_PAGES;
+            previousScanPaused = false;
+        }
+        SlidingPhotoWindow.Request request = photoWindow.previousRequest();
+        if (request == null) {
+            previousRangeMatched = false;
+            request = photoWindow.beginPrevious(photoPageSize());
+        }
+        if (request == null) {
+            loadingPreviousPhotos = false;
+            finishPhotoPage(true);
+            return;
+        }
+        loadingPreviousPhotos = true;
+        photoPaging = new MainPagingState(request.limit, request.offset);
+        requestPhotoPage();
+    }
+
+    /** Release every old row/model/map together; only the visible stable ID may survive eviction. */
+    private void installPhotoWindow(boolean rebuild, boolean previous) {
+        View focused = focusedPhotoWallCard();
+        String anchor = focused == null ? null : (String) focused.getTag(R.id.media_item_id);
+        MediaItem anchorItem = null;
+        Integer oldPosition = anchor == null ? null : photoPositions.get(anchor);
+        if (oldPosition != null) anchorItem = currentMediaList.get(oldPosition);
+        List<MediaItem> next = SlidingPhotoWindow.withAnchor(photoWindow.snapshot(), anchorItem);
+        int previousCount = currentMediaList.size();
+        for (int i = 0; i < Math.min(previousCount, next.size()); i++) {
+            if (!currentMediaList.get(i).getId().equals(next.get(i).getId())) { rebuild = true; break; }
+        }
+        if (next.size() < previousCount) rebuild = true;
+        if (isPageFooter(focused) && previousCount > 0) {
+            String oldLast = currentMediaList.get(previousCount - 1).getId();
+            for (int i = 0; i + 1 < next.size(); i++) {
+                if (next.get(i).getId().equals(oldLast)) { anchor = next.get(i + 1).getId(); break; }
+            }
+        }
+        currentMediaList = next;
+        photoPositions.clear();
+        for (int i = 0; i < next.size(); i++) photoPositions.put(next.get(i).getId(), i);
+        if (rebuild) {
+            reflowingWall = true;
+            resetPagedRows();
+            for (int i = 0; i < next.size(); i++) appendPagedCard(next.get(i), i);
+            updatePageFooter(photoPaging, next.size());
+            if (anchor != null && photoPositions.containsKey(anchor) && focused != null) {
+                photoFocusHandoffPending = true;
+                photoEntryFocusHandoff = false;
+                photoFocusHandoffTargetId = anchor;
+                restorePhotoFocusAfterLayout(anchor, requests.generation(), ++photoFocusHandoffGeneration);
+            } else reflowingWall = false;
+        } else {
+            for (int i = previousCount; i < next.size(); i++) appendPagedCard(next.get(i), i);
+        }
+    }
+
     private void requestPhotoPage() {
-        if (!photoPageDemand.canStartRequest()) {
+        if (!loadingPreviousPhotos && !photoPageDemand.canStartRequest()) {
             finishPhotoPage(true);
             return;
         }
@@ -1835,37 +1993,39 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoPage(true);
             return;
         }
-        photoPageDemand.onRequestStarted();
+        if (!loadingPreviousPhotos) photoPageDemand.onRequestStarted();
+        final boolean previous = loadingPreviousPhotos;
+        final int limit = photoPaging.getPageSize();
         photoFailureMessage = null;
         photoFailureHttpStatus = 0;
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
         if ("shared_album".equals(photoMode)) {
             String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.CONTENT_PATH, "GET",
-                    SharedAlbumSupport.contentQuery(photoAlbumId, offset));
+                    SharedAlbumSupport.contentQuery(photoAlbumId, offset, limit));
             request = api.getSharedAlbumPhotos(token, authx, photoAlbumId, SharedAlbumSupport.START_TIME,
-                    SharedAlbumSupport.END_TIME, offset, SharedAlbumSupport.MEDIA_PAGE_SIZE, "desc");
+                    SharedAlbumSupport.END_TIME, offset, limit, "desc");
         } else if ("album".equals(photoMode)) {
             String params = "album_id=" + photoAlbumId + "&sort_by=date_time&sort_direction=desc&offset="
-                    + offset + "&limit=" + PHOTO_PAGE_SIZE;
+                    + offset + "&limit=" + limit;
             String authx = FnAuthUtils.generateAuthX("/p/api/v1/album/photos", "GET", params);
-            request = api.getAlbumPhotos(token, authx, photoAlbumId, "date_time", "desc", offset, PHOTO_PAGE_SIZE);
+            request = api.getAlbumPhotos(token, authx, photoAlbumId, "date_time", "desc", offset, limit);
         } else {
             String dateTime = "media_type".equals(photoMode) ? null : photoDate.replace("-", ":");
             String start = "media_type".equals(photoMode) ? photoRangeStart : dateTime + " 00:00:00";
             String end = "media_type".equals(photoMode) ? photoRangeEnd : dateTime + " 23:59:59";
             if ("person".equals(photoMode)) {
                 String params = "album_id=" + photoPersonId + "&endTime=" + end + "&end_time=" + end
-                        + "&limit=" + PHOTO_PAGE_SIZE + "&offset=" + offset + "&personId=" + photoPersonId
+                        + "&limit=" + limit + "&offset=" + offset + "&personId=" + photoPersonId
                         + "&startTime=" + start + "&start_time=" + start;
                 String authx = FnAuthUtils.generateAuthX("/p/api/v1/ai-person/photoLibrary/list", "GET", params);
-                request = api.getPersonPhotos(token, authx, photoPersonId, start, end, PHOTO_PAGE_SIZE,
+                request = api.getPersonPhotos(token, authx, photoPersonId, start, end, limit,
                         offset, photoPersonId, start, end);
             } else {
-                String params = "end_time=" + end + "&limit=" + PHOTO_PAGE_SIZE + "&mode=index&offset="
+                String params = "end_time=" + end + "&limit=" + limit + "&mode=index&offset="
                         + offset + "&start_time=" + start;
                 String authx = FnAuthUtils.generateAuthX("/p/api/v1/gallery/getList", "GET", params);
-                request = api.getPhotosByTimeRange(token, authx, start, end, PHOTO_PAGE_SIZE, offset, "index");
+                request = api.getPhotosByTimeRange(token, authx, start, end, limit, offset, "index");
             }
         }
         enqueue(request, new Callback<FnHttpApi.GalleryListResponse>() {
@@ -1887,9 +2047,12 @@ public class MainFragment extends BrowseSupportFragment {
                     ids.add(photo == null || photo.id <= 0 ? null : String.valueOf(photo.id));
                 }
                 applyingPage = true;
-                for (int index : photoPaging.accept(ids, result.data.hasNext)) {
+                List<MediaItem> incoming = new ArrayList<>();
+                photoPaging.accept(ids, result.data.hasNext);
+                // Keep page-local models: a duplicate in a newer raw page must survive
+                // eviction of the older page. The resident snapshot performs display deduplication.
+                for (int index = 0; !photoPaging.hasFailed() && index < result.data.list.size(); index++) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
-                    if (photoPositions.containsKey(String.valueOf(photo.id))) continue;
                     if (!PhotoSelection.includes("favorites".equals(photoMode), photo.isCollect)
                             || !PhotoSelection.matchesCategory("media_type".equals(photoMode) ? photoCategory : null, photo.category)) continue;
                     MediaItem item;
@@ -1909,10 +2072,8 @@ public class MainFragment extends BrowseSupportFragment {
                         item = new MediaItem(String.valueOf(photo.id), photo.fileName,
                                 photo.category, thumbUrl, mediaUrl);
                     }
-                    int position = currentMediaList.size();
-                    currentMediaList.add(item);
-                    photoPositions.put(item.getId(), position);
-                    appendPagedCard(item, position);
+                    item.setBrowseRawOffset(offset + index);
+                    incoming.add(item);
                 }
                 applyingPage = false;
                 if (photoPaging.hasFailed()) {
@@ -1920,11 +2081,68 @@ public class MainFragment extends BrowseSupportFragment {
                     if ("media_type".equals(photoMode) && !rootBrowseLoaded) rootRequestFailed();
                     return;
                 }
+                boolean newMatches = false;
+                for (MediaItem item : incoming) {
+                    if (!photoPositions.containsKey(item.getId())) { newMatches = true; break; }
+                }
+                if (previous) {
+                    if (result.data.list.isEmpty()) {
+                        photoPaging.fail();
+                        photoFailureMessage = "列表已变化，无法重取此前范围；请刷新";
+                        finishPhotoPage(false);
+                        return;
+                    }
+                    try {
+                        photoWindow.acceptPrevious(offset, result.data.list.size(), incoming);
+                    } catch (IllegalArgumentException invalid) {
+                        photoPaging = new MainPagingState(limit, offset);
+                        photoPaging.fail();
+                        photoFailureMessage = "本页元数据超过驻留预算或范围无效；请缩小范围后重试";
+                        finishPhotoPage(false);
+                        return;
+                    }
+                    previousRangeMatched |= newMatches;
+                    previousScanRemaining--;
+                    SlidingPhotoWindow.Request next = photoWindow.previousRequest();
+                    if (next != null) {
+                        if (previousScanRemaining <= 0) {
+                            previousScanPaused = true;
+                            finishPhotoPage(true);
+                        } else {
+                            photoPaging = new MainPagingState(next.limit, next.offset);
+                            requestPhotoPage();
+                        }
+                        return;
+                    }
+                    loadingPreviousPhotos = false;
+                    previousScanPaused = false;
+                    photoPaging = new MainPagingState(photoPageSize(), photoWindow.nextOffset());
+                    installPhotoWindow(true, true);
+                    if (!previousRangeMatched && photoWindow.hasPrevious()) {
+                        if (previousScanRemaining > 0) {
+                            loadPreviousPhotoPage(false);
+                            return;
+                        }
+                        previousScanPaused = true;
+                    }
+                } else {
+                    int oldStart = photoWindow.firstOffset();
+                    try {
+                        photoWindow.append(offset, result.data.list.size(), incoming, photoPaging.hasMore());
+                    } catch (IllegalArgumentException invalid) {
+                        photoPaging = new MainPagingState(limit, offset);
+                        photoPaging.fail();
+                        photoFailureMessage = "本页元数据超过驻留预算或范围无效；请缩小范围后重试";
+                        finishPhotoPage(false);
+                        return;
+                    }
+                    installPhotoWindow(photoWindow.firstOffset() != oldStart, false);
+                }
                 if ("media_type".equals(photoMode)) rootLoadSucceeded();
                 // Sparse filters get a finite raw-page budget per action. The
                 // paused footer, not a false "empty/end", invites explicit continuation.
-                if (isFilteredPhotoMode() && photoScan.acceptPage(
-                        currentMediaList.size() > previousCount, photoPaging.hasMore())) {
+                if (!previous && isFilteredPhotoMode() && photoScan.acceptPage(
+                        newMatches, photoPaging.hasMore())) {
                     requestPhotoPage();
                     return;
                 }
@@ -1945,14 +2163,15 @@ public class MainFragment extends BrowseSupportFragment {
         if (detailPageCallback != null) {
             MediaListHolder.PageCallback callback = detailPageCallback;
             detailPageCallback = null;
-            if (success && photoPaging.hasMore()
-                    && (photoScan.isPaused() || photoPageDemand.isPaused())) callback.onPaused(
-                    photoScan.isPaused() ? "已扫描 " + photoPaging.getOffset() + " 条，暂未找到更多匹配"
+            if (success && (previousScanPaused || (photoPaging.hasMore()
+                    && (photoScan.isPaused() || photoPageDemand.isPaused())))) callback.onPaused(
+                    previousScanPaused ? "此前范围尚未读完，按确定继续" : photoScan.isPaused() ? "已扫描 " + photoPaging.getOffset() + " 条，暂未找到更多匹配"
                             : "本次自动加载已达 " + MetadataLimits.MAX_SCAN_PAGES + " 页");
             else if (success) callback.onLoaded(new ArrayList<>(currentMediaList),
-                    photoPaging.hasMore() && !isWindowFull(photoPaging, currentMediaList.size()));
+                    photoWindow != null && photoWindow.hasMore());
             else callback.onFailure();
         }
+        applyPendingPhotoReturn();
         schedulePhotoDemandCheck();
     }
 
@@ -2001,33 +2220,12 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private boolean isWindowFull(MainPagingState state, int count) {
-        return state != null && state.hasMore()
+        return state != null && state != photoPaging && state.hasMore()
                 && !MainMetadataWindow.fitsNextPage(count, state.getPageSize());
     }
 
     private String scanPausedMessage() {
         return "确定：继续扫描（已查" + photoPaging.getOffset() + "条）";
-    }
-
-    private void nextPhotoWindow() {
-        // Only an explicit list action replaces a window. Invalidate any detail
-        // source referring to the previous window before dropping its metadata.
-        requests.next();
-        positionHandler.removeCallbacksAndMessages(null);
-        MediaListHolder.clear();
-        currentMediaList = new ArrayList<>();
-        photoPositions.clear();
-        photoScan.reset();
-        photoPageDemand.reset();
-        photoDemandCheckPosted = false;
-        photoFocusHandoffPending = false;
-        photoEntryFocusHandoff = false;
-        initialPhotoFocusPending = false;
-        photoFocusHandoffGeneration++;
-        photoFocusHandoffTargetId = null;
-        resetPagedRows();
-        loadPhotoPage(true);
-        positionHandler.post(() -> setSelectedPosition(0));
     }
 
     private void nextAlbumWindow() {
@@ -2083,16 +2281,20 @@ public class MainFragment extends BrowseSupportFragment {
                     : BrowseStatus.httpFailure(state == photoPaging ? photoFailureHttpStatus : albumFailureHttpStatus).title
                             + " · 确定重试（本批 " + count + " 项）";
         }
+        else if (state == photoPaging && previousScanPaused) status = "确定：继续向前扫描";
         else if (state.isStalled()) status = "结果可能不完整 · 请返回";
         else if (isWindowFull(state, count)) status = "确定：下一批（替换本批" + count + "项）";
         else if (state == photoPaging && photoScan.isPaused()) status = scanPausedMessage();
         else if (state == photoPaging && state.hasMore() && photoPageDemand.isPaused()
                 && photoPageDemand.needsMore(count, PREFETCH_DISTANCE)) status = "确定：继续加载（本批 " + count + " 项）";
-        else if (state.hasMore()) status = state == photoPaging ? "继续向下浏览 · " + count + " 项"
+        else if (state == photoPaging ? photoWindow.hasMore() : state.hasMore()) status = state == photoPaging ? "继续向下浏览 · " + count + " 项"
                 : "确定：加载更多（本批 " + count + " 项）";
         else status = count == 0 ? (sharedAlbumDirectory ? "暂无共享相册"
                 : "shared_album".equals(photoMode) ? "相册为空" : "扫描到末尾 · 本批无匹配")
                 : "已到末尾 · 本批 " + count + " 项";
+        if (state == photoPaging && photoWindow != null) {
+            status += " · 驻留 " + count + " 项 / 原始范围 " + photoWindow.firstOffset() + "–" + photoWindow.nextOffset();
+        }
         MediaItem action = new MediaItem("__page_action", status, "page_action", null, null);
         if (pageFooter == null) {
             pageFooterAdapter = new ArrayObjectAdapter(new PageFooterPresenter());
@@ -2550,70 +2752,156 @@ public class MainFragment extends BrowseSupportFragment {
             });
         } else {
             final long generation = requests.generation();
+            detailAnchorId = mediaItem.getId();
+            detailAnchorItem = mediaItem;
             MediaListHolder.set(currentMediaList, new MediaListHolder.PageSource() {
-                private final MainPagingState.DeliveryCursor delivery =
-                        new MainPagingState.DeliveryCursor(currentMediaList.size());
+                private String deliveredFirst = currentMediaList.get(0).getId();
+                private String deliveredLast = currentMediaList.get(currentMediaList.size() - 1).getId();
+                private int deliveredFirstRaw = currentMediaList.get(0).getBrowseRawOffset();
+                private int deliveredLastRaw = currentMediaList.get(currentMediaList.size() - 1).getBrowseRawOffset();
+                private String anchorBoundary;
+                private final DetailScanContinuation scanContinuation = new DetailScanContinuation();
+                @Override public boolean isWindowed() { return true; }
+                @Override public void setAnchor(MediaItem item) {
+                    detailAnchorId = item.getId();
+                    detailAnchorItem = item;
+                }
+                @Override public void onReturn(MediaItem item) {
+                    if (active()) restoreReturnedPhoto(item);
+                }
+                @Override public void setAnchorId(String id) {
+                    detailAnchorId = id;
+                    for (MediaItem item : currentMediaList) {
+                        if (item.getId().equals(id)) { detailAnchorItem = item; break; }
+                    }
+                }
+                private boolean active() { return requests.isCurrent(generation) && photoWindow != null; }
                 @Override public boolean hasMore() {
-                    return requests.isCurrent(generation) && photoPaging != null
-                            && (delivery.hasPending(currentMediaList.size()) || (photoPaging.hasMore()
-                            && !isWindowFull(photoPaging, currentMediaList.size())));
+                    Integer last = photoPositions.get(deliveredLast);
+                    return active() && (photoWindow.hasMore()
+                            || (last != null && last + 1 < currentMediaList.size())
+                            || (last == null && SlidingPhotoWindow.hasRawNeighbor(currentMediaList, deliveredLastRaw, false)));
+                }
+                @Override public boolean hasPrevious() {
+                    Integer first = photoPositions.get(deliveredFirst);
+                    return active() && (photoWindow.hasPrevious() || (first != null && first > 0)
+                            || (first == null && SlidingPhotoWindow.hasRawNeighbor(currentMediaList, deliveredFirstRaw, true)));
                 }
                 @Override public String getBoundaryMessage() {
-                    if (!requests.isCurrent(generation) || photoPaging == null)
-                        return "列表已切换，请返回列表重新打开";
-                    if (isWindowFull(photoPaging, currentMediaList.size()))
-                        return "本批已达内存上限，请返回列表选择下一批";
-                    if (photoPaging.isStalled()) return "服务器返回重复或矛盾空页；结果可能不完整，请返回列表";
-                    if (photoPaging.isOffsetLimited()) return "已到接口偏移上限，请返回列表缩小查询范围";
+                    if (!active() || photoPaging == null) return "列表已切换，请返回列表重新打开";
+                    if (anchorBoundary != null) return anchorBoundary;
+                    if (photoPaging.isStalled()) return "服务器返回重复或矛盾空页；结果可能不完整，请刷新";
+                    if (photoPaging.isOffsetLimited()) return "已到接口偏移上限，请缩小查询范围";
                     return null;
                 }
                 @Override public void loadMore(MediaListHolder.PageCallback callback) {
-                    if (!hasMore() || detailPageCallback != null) {
+                    requestDetailPage(false, callback);
+                }
+                @Override public void loadPrevious(MediaListHolder.PageCallback callback) {
+                    requestDetailPage(true, callback);
+                }
+                private List<MediaItem> snapshot(boolean previous) {
+                    // Raw position, not requested direction, determines chronological order.
+                    return SlidingPhotoWindow.withAnchor(currentMediaList, detailAnchorItem);
+                }
+                private boolean hasNeighbor(List<MediaItem> rows, boolean previous) {
+                    for (int i = 0; i < rows.size(); i++) if (rows.get(i).getId().equals(detailAnchorId))
+                        return previous ? i > 0 : i + 1 < rows.size();
+                    return false;
+                }
+                private void deliver(List<MediaItem> rows, MediaListHolder.PageCallback callback) {
+                    if (!rows.isEmpty()) {
+                        deliveredFirst = rows.get(0).getId();
+                        deliveredLast = rows.get(rows.size() - 1).getId();
+                        deliveredFirstRaw = rows.get(0).getBrowseRawOffset();
+                        deliveredLastRaw = rows.get(rows.size() - 1).getBrowseRawOffset();
+                    }
+                    callback.onLoaded(rows, photoWindow.hasMore());
+                }
+                private void requestDetailPage(final boolean previous, final MediaListHolder.PageCallback callback) {
+                    if (!active() || photoPaging == null || detailPageCallback != null) {
                         callback.onFailure();
                         return;
                     }
-                    // A prefetch can finish (including its terminal page) after detail copied its list.
-                    // Deliver that buffered tail before consulting/fetching the next network page.
-                    if (delivery.hasPending(currentMediaList.size())) {
-                        delivery.delivered(currentMediaList.size());
-                        callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore()
-                                && !isWindowFull(photoPaging, currentMediaList.size()));
+                    anchorBoundary = null;
+                    final int anchorRaw = detailAnchorItem == null ? -1 : detailAnchorItem.getBrowseRawOffset();
+                    final boolean outside = anchorRaw >= 0 && (anchorRaw < photoWindow.firstOffset()
+                            || anchorRaw >= photoWindow.nextOffset());
+                    final boolean relocate = scanContinuation.shouldRelocate(
+                            detailAnchorId, anchorRaw, previous, outside);
+                    List<MediaItem> buffered = snapshot(previous);
+                    // A pin preserves identity, not adjacency across discarded dense pages.
+                    // Re-anchor the raw range before navigating outside the resident interval.
+                    if (!relocate && hasNeighbor(buffered, previous)) {
+                        deliver(buffered, callback);
                         return;
                     }
+                    final boolean oppositeInFlight = photoPaging.isLoading() && loadingPreviousPhotos != previous;
                     detailPageCallback = new MediaListHolder.PageCallback() {
-                        @Override public void onLoaded(List<MediaItem> items, boolean hasMore) {
-                            delivery.delivered(items.size());
-                            callback.onLoaded(items, hasMore);
+                        private boolean waitedForOpposite = oppositeInFlight || (relocate && photoPaging.isLoading());
+                        private boolean continueOpposite() {
+                            if (!waitedForOpposite) return false;
+                            waitedForOpposite = false;
+                            detailPageCallback = this;
+                            preparePhotoDirection(previous);
+                            int raw = detailAnchorItem == null ? -1 : detailAnchorItem.getBrowseRawOffset();
+                            if (raw >= 0 && (raw < photoWindow.firstOffset() || raw >= photoWindow.nextOffset()))
+                                relocatePhotoWindow(detailAnchorItem, previous);
+                            if (previous) loadPreviousPhotoPage(true); else loadPhotoPage(true);
+                            return true;
+                        }
+                        @Override public void onLoaded(List<MediaItem> ignored, boolean more) {
+                            if (!active()) { callback.onFailure(); return; }
+                            List<MediaItem> rows = snapshot(previous);
+                            if ((relocate || !hasNeighbor(rows, previous)) && continueOpposite()) return;
+                            boolean anchorFound = false;
+                            for (MediaItem row : rows) if (row.getId().equals(detailAnchorId)) anchorFound = true;
+                            if (!anchorFound) {
+                                if (previous ? photoWindow.hasPrevious() : photoWindow.hasMore()) {
+                                    callback.onPaused("正在重新定位当前照片，请继续" + (previous ? "向前" : "向后") + "扫描");
+                                } else {
+                                    anchorBoundary = "已到范围边界但当前照片未重现，列表可能已变化；请返回刷新";
+                                    callback.onPaused(anchorBoundary);
+                                }
+                                return;
+                            }
+                            deliver(rows, callback);
                         }
                         @Override public void onFailure() { callback.onFailure(); }
                         @Override public void onPaused(String message) {
-                            // The last permitted page may contain a new tail. Deliver it before
-                            // exposing the automatic scan boundary to a waiting detail screen.
-                            if (delivery.hasPending(currentMediaList.size())) {
-                                delivery.delivered(currentMediaList.size());
-                                callback.onLoaded(new ArrayList<>(currentMediaList), photoPaging.hasMore()
-                                        && !isWindowFull(photoPaging, currentMediaList.size()));
-                            } else callback.onPaused(message);
+                            if (!active()) { callback.onFailure(); return; }
+                            List<MediaItem> rows = snapshot(previous);
+                            if (relocate && continueOpposite()) return;
+                            if (hasNeighbor(rows, previous)) deliver(rows, callback);
+                            else if (!continueOpposite()) callback.onPaused(message);
                         }
                     };
-                    // A list prefetch may already be in flight; its completion also serves this callback.
-                    if (!photoPaging.isLoading()) loadPhotoPage(true);
+                    if (!photoPaging.isLoading()) {
+                        preparePhotoDirection(previous);
+                        if (relocate) relocatePhotoWindow(detailAnchorItem, previous);
+                        if (previous) loadPreviousPhotoPage(true);
+                        else loadPhotoPage(true);
+                    }
                 }
             });
         }
         Intent intent = new Intent(getActivity(), MediaDetailActivity.class);
         intent.putExtra("CURRENT_INDEX", index);
         intent.putExtra("SHARED_ALBUM_READ_ONLY", "shared_album".equals(photoMode));
-        if ("shared_album".equals(photoMode)) startActivityForResult(intent, SHARED_DETAIL_REQUEST);
-        else startActivity(intent);
+        startActivityForResult(intent, SHARED_DETAIL_REQUEST);
     }
 
     @Override public void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != SHARED_DETAIL_REQUEST || resultCode != android.app.Activity.RESULT_OK
-                || data == null || !"shared_album".equals(photoMode) || photoPaging == null) return;
-        Integer position = photoPositions.get(data.getStringExtra("LAST_MEDIA_ID"));
-        if (position != null) positionHandler.post(() -> restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns));
+                || data == null || photoPaging == null) return;
+        final String id = data.getStringExtra("LAST_MEDIA_ID");
+        final long generation = requests.generation();
+        positionHandler.post(() -> {
+            if (!requests.isCurrent(generation)) return;
+            Integer position = photoPositions.get(id);
+            if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
+        });
     }
 
     private void openFolderBrowse(MediaItem folderItem) {

@@ -10,6 +10,7 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.util.Log;
@@ -42,7 +43,6 @@ public class CardPresenter extends Presenter {
         0xFFFF7043, 0xFF42A5F5, 0xFFAB47BC, 0xFF26C6DA,
         0xFF78909C, 0xFFFFA726, 0xFF8D6E63, 0xFFEC407A
     };
-    private static Drawable[] folderCardPlaceholders;
     private static int lastFolderColorIndex = -1;
 
     private String baseUrl;
@@ -430,37 +430,16 @@ public class CardPresenter extends Presenter {
     }
 
     private Drawable createPlaceholderDrawable(Context context) {
-        Bitmap bitmap = Bitmap.createBitmap(DATE_CARD_WIDTH, DATE_CARD_HEIGHT, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        canvas.drawColor(Color.parseColor("#33000000"));
-        
-        return new BitmapDrawable(context.getResources(), bitmap);
+        return new ColorDrawable(0x33000000);
     }
 
     private Drawable getFolderCardDrawable(Context context) {
-        if (folderCardPlaceholders == null) {
-            folderCardPlaceholders = new Drawable[FOLDER_COLORS.length];
-            int bw = CARD_WIDTH * 3;
-            int bh = CARD_HEIGHT * 3;
-            for (int i = 0; i < FOLDER_COLORS.length; i++) {
-                Bitmap bitmap = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-                Canvas canvas = new Canvas(bitmap);
-                canvas.drawColor(FOLDER_COLORS[i]);
-
-                Drawable folderDrawable = ContextCompat.getDrawable(context, R.drawable.folder_icon);
-                if (folderDrawable != null) {
-                    int iconSize = CARD_HEIGHT / 2;
-                    int cx = bw / 2;
-                    int cy = bh / 2;
-                    folderDrawable.setBounds(cx - iconSize, cy - iconSize, cx + iconSize, cy + iconSize);
-                    folderDrawable.draw(canvas);
-                }
-
-                folderCardPlaceholders[i] = new BitmapDrawable(context.getResources(), bitmap);
-            }
-        }
         lastFolderColorIndex = (lastFolderColorIndex + 1) % FOLDER_COLORS.length;
-        return folderCardPlaceholders[lastFolderColorIndex];
+        // Draw the solid background and existing icon directly. The old static cache
+        // pinned twelve 960 x 540 ARGB rasters (24,883,200 bytes) for the process lifetime.
+        // Each holder owns its drawable bounds; the resource system can share icon pixels.
+        return new FolderCardDrawable(FOLDER_COLORS[lastFolderColorIndex],
+                ContextCompat.getDrawable(context, R.drawable.folder_icon));
     }
 
     private void loadSingleImage(ImageCardView cardView, MediaItem mediaItem) {

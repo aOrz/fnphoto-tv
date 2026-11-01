@@ -455,6 +455,35 @@ public class MainActivity extends FragmentActivity {
         if (fragment instanceof MainFragment) ((MainFragment) fragment).cancelPhotoFocusHandoff();
     }
 
+    private boolean virtualUpOwned;
+
+    // Old AndroidX marks the public Activity/Window.Callback override restricted.
+    // Delegate to that framework entry point; no private AndroidX helper is used.
+    @android.annotation.SuppressLint("RestrictedApi")
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment instanceof MainFragment) ((MainFragment) fragment).notePhotoWallDirection(event.getKeyCode());
+        }
+        if (event.getKeyCode() == KeyEvent.KEYCODE_DPAD_UP) {
+            if (event.getAction() == KeyEvent.ACTION_UP && virtualUpOwned) {
+                virtualUpOwned = false;
+                return true;
+            }
+            if (event.getAction() == KeyEvent.ACTION_DOWN && virtualUpOwned) return true;
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
+                        .findFragmentById(R.id.main_content_container);
+                if (fragment instanceof MainFragment && ((MainFragment) fragment).handlePhotoWindowUp()) {
+                    virtualUpOwned = true;
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     @Override public void onUserInteraction() {
         super.onUserInteraction();
         cancelPendingPhotoFocusHandoff();
