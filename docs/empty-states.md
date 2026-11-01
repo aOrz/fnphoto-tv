@@ -55,6 +55,12 @@
 原始行 offset、去重、在途请求、窗口预算或自动预取规则。主界面零内容面板保留底层
 分页 footer，重试仍调用原加载入口。导航使旧请求及旧状态动作失效。
 
+主界面分页 footer 使用独立 `PageFooterPresenter` 文字条，不使用媒体图片 Presenter，
+不显示默认相册图标，也不再固定显示“加载状态”行标题。加载中、错误重试、继续扫描和
+下一批文字始终可读（不依赖聚焦）；确认终止后仅显示“已到末尾 · 本批 N 项”，
+不将已加载窗口误称为整个图库。状态条仍支持 DPAD 聚焦，以保留在途请求结束时的
+照片焦点交接以及末尾向上/返回操作；其展示变化不发起请求、不改变分页条件。
+
 列表响应必须包含明确成功的业务状态码。`TimelineResponse`、`AlbumListResponse`、
 `FolderListResponse`、`SubFolderListResponse`、`FolderFileListResponse`、`GeoListResponse`、
 `PersonListResponse`、`PersonTimelineResponse` 与原有 Gallery/Shared 响应一样，缺失或 null
