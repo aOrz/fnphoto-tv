@@ -14,10 +14,12 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.TextView;
 
 import androidx.leanback.widget.ArrayObjectAdapter;
 import androidx.leanback.widget.HorizontalGridView;
 import androidx.leanback.widget.ListRow;
+import androidx.leanback.widget.ItemBridgeAdapter;
 import androidx.leanback.widget.ListRowPresenter;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -200,6 +202,72 @@ public class PhotoWallDeviceTest {
             return null;
         });
         screenshot("album-second-page");
+    }
+
+    @Test public void footerStaysTextOnlyWhileLoadingAndAtEndOfAlbum() throws Exception {
+        onMain(() -> { fragment().loadPhotosByAlbum("1", "Synthetic footer"); return null; });
+        awaitFirstPhoto(35);
+        fixture.albumGate = new CountDownLatch(1);
+        int before = fixture.albumRequests.get();
+        onMain(() -> { select(rows().size() - 1, 0); return null; });
+        await(() -> "__page_action".equals(focusedTag(R.id.media_item_id))
+                && fixture.albumRequests.get() == before + 1);
+        onMain(() -> { assertTextFooter("正在加载"); return null; });
+        // Repeated input while the footer owns demand must not duplicate the in-flight page.
+        for (int i = 0; i < 5; i++) key(KeyEvent.KEYCODE_DPAD_DOWN);
+        assertEquals(before + 1, fixture.albumRequests.get());
+        screenshot("footer-loading-text-only");
+        fixture.albumGate.countDown();
+        await(() -> media().size() == 70 && !((MainPagingState) field(fragment(), "photoPaging")).hasMore());
+        await(() -> "photo".equals(focusedTag(R.id.media_item_type)));
+        onMain(() -> { select(rows().size() - 1, 0); return null; });
+        await(() -> "__page_action".equals(focusedTag(R.id.media_item_id)));
+        onMain(() -> { assertTextFooter("已到末尾"); return null; });
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        assertEquals("Confirmed end must not request another page", before + 1, fixture.albumRequests.get());
+        screenshot("footer-album-end-text-only");
+    }
+
+    @Test public void textFooterRetainsExplicitRetryAndOriginalOffset() throws Exception {
+        onMain(() -> { fragment().loadPhotosByAlbum("1", "Synthetic retry"); return null; });
+        awaitFirstPhoto(35);
+        fixture.albumMode = "error";
+        int before = fixture.albumRequests.get();
+        onMain(() -> { select(rows().size() - 1, 0); return null; });
+        await(() -> ((MainPagingState) field(fragment(), "photoPaging")).hasFailed()
+                && "__page_action".equals(focusedTag(R.id.media_item_id)));
+        onMain(() -> { assertTextFooter("确定重试"); return null; });
+        assertEquals("35", fixture.lastAlbumOffset);
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        assertEquals("Focus alone must not retry a failure", before + 1, fixture.albumRequests.get());
+        screenshot("footer-retry-text-only");
+        fixture.albumMode = "normal";
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> media().size() == 70);
+        assertEquals("Retry must reuse the failed raw offset", "35", fixture.lastAlbumOffset);
+        assertEquals(before + 2, fixture.albumRequests.get());
+    }
+
+    /** Called on the UI thread with the footer row attached. */
+    private void assertTextFooter(String expected) throws Exception {
+        ListRow footer = (ListRow) field(fragment(), "pageFooter");
+        assertNull("No misleading permanent loading header", footer.getHeaderItem());
+        int index = rows().indexOf(footer);
+        HorizontalGridView grid = rowHolder(index).getGridView();
+        ItemBridgeAdapter.ViewHolder holder = (ItemBridgeAdapter.ViewHolder)
+                grid.findViewHolderForAdapterPosition(0);
+        assertNotNull("Footer must be attached", holder);
+        View view = holder.getViewHolder().view;
+        assertTrue("Paging status is text, never a photo placeholder", view instanceof TextView);
+        TextView status = (TextView) view;
+        assertTrue(status.getText().toString(), status.getText().toString().contains(expected));
+        assertEquals(View.VISIBLE, status.getVisibility());
+        assertTrue("Retry/continue remains remote focusable", status.isFocusable());
+        // Unlike CardPresenter's info overlay, text visibility must not depend on focus.
+        status.clearFocus();
+        assertEquals(View.VISIBLE, status.getVisibility());
+        assertTrue(status.getText().toString().contains(expected));
+        assertTrue(status.requestFocus());
     }
 
     @Test public void searchAndFolderUseMeasuredSpansAndKeepRemoteFocus() throws Exception {

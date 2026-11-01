@@ -2092,12 +2092,12 @@ public class MainFragment extends BrowseSupportFragment {
                 : "确定：加载更多（本批 " + count + " 项）";
         else status = count == 0 ? (sharedAlbumDirectory ? "暂无共享相册"
                 : "shared_album".equals(photoMode) ? "相册为空" : "扫描到末尾 · 本批无匹配")
-                : "扫描到末尾 · 本批 " + count + " 项";
+                : "已到末尾 · 本批 " + count + " 项";
         MediaItem action = new MediaItem("__page_action", status, "page_action", null, null);
         if (pageFooter == null) {
-            pageFooterAdapter = new ArrayObjectAdapter(mCardPresenter);
+            pageFooterAdapter = new ArrayObjectAdapter(new PageFooterPresenter());
             pageFooterAdapter.add(action);
-            pageFooter = new ListRow(new HeaderItem("加载状态"), pageFooterAdapter);
+            pageFooter = new ListRow(pageFooterAdapter);
             mRowsAdapter.add(pageFooter);
         } else {
             pageFooterAdapter.replace(0, action);
