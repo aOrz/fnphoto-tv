@@ -6,6 +6,22 @@ An Android TV application for browsing photos and videos from FN NAS (fnOS) phot
 
 ## App screenshots
 
+### Slideshow settings and pause
+
+These are actual Android TV API 29 emulator captures of the slideshow feature merged into current main, using synthetic images and video without private media. See [screenshot provenance](docs/slideshow-screenshots/README.md) for the build, original-image checksums and scope. They do not identify a new release or establish real-NAS compatibility.
+
+**Playback settings: interval, looping and video selection**
+
+![Slideshow settings: five-second interval, looping on, videos skipped; remote focus is on the video option](docs/slideshow-screenshots/01-settings.png)
+
+**Paused video: status and remote controls**
+
+![Paused slideshow with a synthetic video at one second and the Play button focused](docs/slideshow-screenshots/02-video-paused.png)
+
+In photo detail, press OK to start/pause/resume and Menu to configure playback; for video, use the Slideshow action in the control row. Choose 3/5/10/15/30-second intervals, looping over the complete current range, and whether to skip videos. Looping is explicitly rejected for incomplete sources rather than treating the loaded paging window as the entire album. See [slideshow behavior and limits](docs/slideshow.md).
+
+### Other screens (historical captures)
+
 These existing application screenshots show synthetic test content, with no real user photos or accounts. They were added in the [UI redesign commit `4133a81`](https://github.com/aOrz/fnphoto-tv/commit/4133a81ffac85ae14860f6da9f4493e713fd753b) and predate later updates on main, so details such as focus styling may differ. They do not identify a released build or establish compatibility with a real NAS.
 
 **Gallery timeline**
@@ -29,6 +45,7 @@ The `10.0.2.2` address in the settings screenshot connects an emulator to its ho
 - **Folder View**: Navigate through managed folders
 - **Album View**: Browse user-created albums
 - **Shared Albums**: Browse albums shared to you, with paged photo/video viewing and retryable loading ([contract and limits](docs/shared-albums.md))
+- **Slideshow**: Configurable intervals, pause/resume and video selection; complete current-album/list looping for restartable sources ([controls and limits](docs/slideshow.md))
 - **Media Playback**: View photos and play videos with full-screen support
 - **Seamless Navigation**: Use TV remote to navigate between photos with left/right keys
 - **Fullscreen Experience**: Distraction-free viewing without system UI
@@ -153,4 +170,4 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 
 ## Testing and synthetic data
 
-Reproducible mock fixtures, generated H264/AAC videos, and remote-control regression cases live in [test/README.md](test/README.md). See the [device QA checklist](test/QA_CHECKLIST.md) and [CI instructions](.github/CI.md). No real NAS account or private media is needed. Keep newly generated QA media, keys, screenshots, and logs in the ignored `test/.generated/` directory and do not commit them. The screenshots above reuse public documentation images already in the repository.
+Reproducible mock fixtures, generated H264/AAC videos, and remote-control regression cases live in [test/README.md](test/README.md). See the [device QA checklist](test/QA_CHECKLIST.md) and [CI instructions](.github/CI.md). No real NAS account or private media is needed. Keep raw QA media, keys, screenshot archives and logs in the ignored `test/.generated/` directory; do not commit them. The two synthetic slideshow captures above are explicitly selected documentation assets for this README update, with provenance and checksums stored alongside them. Other screenshots reuse existing public documentation images.
