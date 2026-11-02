@@ -369,6 +369,119 @@ public class PhotoWallDeviceTest {
         recordMemory("returnedFirst");
     }
 
+    @Test public void slideshowLoopsWholeAlbumAfterWindowEvictionAndReturnsFirstFocus() throws Exception {
+        openLargeAlbumTailDetail();
+        int before = fixture.albumRequests.get();
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> ((SlideshowState) field(extraActivity, "slideshow")).running());
+        await(() -> "1".equals(field(extraActivity, "displayedMediaId")));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> ((SlideshowState) field(extraActivity, "slideshow")).paused());
+        assertEquals("The first new range request restarts raw offset zero", "0",
+                fixture.albumOffsets.get(before));
+        onMain(() -> {
+            assertEquals("Loop reaches the actual first item, not the evicted window head", "1",
+                    field(extraActivity, "displayedMediaId"));
+            assertTrue("Main window stays bounded after restart", media().size() <= 560);
+            assertTrue("Detail replacement stays bounded after restart",
+                    ((List<?>) field(extraActivity, "mediaList")).size() <= 561);
+            assertTrue("Index stays bounded after restart",
+                    ((Map<?, ?>) field(fragment(), "photoPositions")).size() <= 560);
+            return null;
+        });
+        screenshot("slideshow-large-album-loop-real-first");
+        returnFromSlideshowToFirstPhoto("loop");
+    }
+
+    @Test public void slideshowPauseDuringWholeAlbumRestartKeepsTailUntilExplicitResume() throws Exception {
+        openLargeAlbumTailDetail();
+        fixture.albumGate = new CountDownLatch(1);
+        int before = fixture.albumRequests.get();
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> fixture.albumRequests.get() > before && "0".equals(fixture.lastAlbumOffset)
+                && ((MediaPageController) field(extraActivity, "pageController")).isLoading());
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> ((SlideshowState) field(extraActivity, "slideshow")).paused());
+        assertEquals("Paused in-flight restart keeps current tail", "630",
+                onMain(() -> field(extraActivity, "displayedMediaId")));
+        fixture.albumGate.countDown();
+        await(() -> !((MediaPageController) field(extraActivity, "pageController")).isLoading());
+        Thread.sleep(3500);
+        onMain(() -> {
+            assertTrue(((SlideshowState) field(extraActivity, "slideshow")).paused());
+            assertEquals("Late offset-zero result cannot replace the paused displayed media", "630",
+                    field(extraActivity, "displayedMediaId"));
+            assertTrue(((List<?>) field(extraActivity, "mediaList")).size() <= 561);
+            assertTrue(media().size() <= 560);
+            return null;
+        });
+        assertEquals("0", fixture.albumOffsets.get(before));
+        screenshot("slideshow-large-album-restart-paused-tail");
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> "1".equals(field(extraActivity, "displayedMediaId")));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(() -> ((SlideshowState) field(extraActivity, "slideshow")).paused());
+        screenshot("slideshow-large-album-restart-resumed-first");
+        returnFromSlideshowToFirstPhoto("paused-restart");
+    }
+
+    /** Arrange with actual paged wall selections; only playback preferences are seeded. */
+    private void openLargeAlbumTailDetail() throws Exception {
+        fixture.albumCount = 630; // 18 ordinary pages: definitely evicts the 560-row head.
+        assertTrue(prefs.edit().putInt("slideshow_seconds", 3)
+                .putBoolean("slideshow_loop", true).putBoolean("slideshow_videos", true).commit());
+        onMain(() -> { fragment().loadPhotosByAlbum("1", "Synthetic slideshow whole range"); return null; });
+        awaitFirstPhoto(35);
+        while (onMain(() -> Integer.parseInt(media().get(media().size() - 1).getId())) < 630) {
+            final String tail = onMain(() -> media().get(media().size() - 1).getId());
+            onMain(() -> {
+                int index = media().size() - 1;
+                select(index / layout().columns, index % layout().columns);
+                return null;
+            });
+            await(() -> !tail.equals(media().get(media().size() - 1).getId())
+                    && !((MainPagingState) field(fragment(), "photoPaging")).isLoading());
+            onMain(() -> {
+                assertTrue("Whole-range setup uses bounded windows", media().size() <= 560);
+                return null;
+            });
+        }
+        await(() -> !((MainPagingState) field(fragment(), "photoPaging")).hasMore()
+                && !((MainPagingState) field(fragment(), "photoPaging")).isLoading());
+        onMain(() -> {
+            assertTrue("Fixture must have evicted the real first photo",
+                    Integer.parseInt(media().get(0).getId()) > 1);
+            int last = media().size() - 1;
+            select(last / layout().columns, last % layout().columns);
+            return null;
+        });
+        await(() -> "630".equals(focusedTag(R.id.media_item_id)));
+        awaitFocusedSyntheticImage();
+        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(
+                MediaDetailActivity.class.getName(), null, false);
+        try {
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            extraActivity = instrumentation.waitForMonitorWithTimeout(monitor, 30000);
+            assertNotNull("Tail opens a real detail Activity with the real MainFragment source", extraActivity);
+            await(() -> "630".equals(field(extraActivity, "displayedMediaId"))
+                    && Boolean.TRUE.equals(field(extraActivity, "currentPhotoReady")));
+            onMain(() -> {
+                assertTrue(((List<?>) field(extraActivity, "mediaList")).size() <= 561);
+                assertTrue(((SlideshowState) field(extraActivity, "slideshow")).loop());
+                assertEquals(3, ((SlideshowState) field(extraActivity, "slideshow")).seconds());
+                return null;
+            });
+        } finally { instrumentation.removeMonitor(monitor); }
+    }
+
+    private void returnFromSlideshowToFirstPhoto(String scenario) throws Exception {
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> activity.hasWindowFocus() && "1".equals(focusedTag(R.id.media_item_id)));
+        extraActivity = null;
+        awaitFocusedSyntheticImage();
+        screenshot("slideshow-large-album-" + scenario + "-back-first-focus");
+    }
+
     /** A gallery placeholder must never count as decoded-image/focus evidence. */
     private void awaitFocusedSyntheticImage() throws Exception {
         await(() -> {
@@ -649,8 +762,9 @@ public class PhotoWallDeviceTest {
         Bitmap bitmap = instrumentation.getUiAutomation().takeScreenshot();
         assertNotNull(bitmap);
         File directory = instrumentation.getTargetContext().getExternalFilesDir("wall-evidence");
-        assertNotNull(directory);
-        directory.mkdirs();
+        if (directory == null || !(directory.isDirectory() || directory.mkdirs()))
+            directory = new File(instrumentation.getTargetContext().getFilesDir(), "wall-evidence");
+        assertTrue("Writable screenshot evidence directory required", directory.isDirectory() || directory.mkdirs());
         String suffix = bitmap.getWidth() + "x" + bitmap.getHeight() + "-"
                 + instrumentation.getTargetContext().getResources().getDisplayMetrics().densityDpi
                 + "-font" + instrumentation.getTargetContext().getResources().getConfiguration().fontScale;
@@ -671,6 +785,7 @@ public class PhotoWallDeviceTest {
         final ServerSocket server;
         final AtomicInteger albumRequests = new AtomicInteger();
         final AtomicInteger albumResponses = new AtomicInteger();
+        final List<String> albumOffsets = java.util.Collections.synchronizedList(new ArrayList<>());
         volatile String lastAlbumOffset = "";
         volatile String albumMode = "normal";
         volatile CountDownLatch albumGate;
@@ -731,7 +846,9 @@ public class PhotoWallDeviceTest {
                         || target.startsWith("/p/api/v1/album/normal/getList")) {
                     albumRequest = true;
                     String offset = android.net.Uri.parse(baseUrl() + target).getQueryParameter("offset");
-                    lastAlbumOffset = offset; albumRequests.incrementAndGet();
+                    lastAlbumOffset = offset;
+                    albumOffsets.add(offset);
+                    albumRequests.incrementAndGet();
                     int start = Integer.parseInt(offset);
                     CountDownLatch gate = albumGate;
                     if (gate != null) gate.await(15, TimeUnit.SECONDS);

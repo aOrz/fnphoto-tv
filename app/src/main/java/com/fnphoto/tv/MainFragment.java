@@ -2760,7 +2760,7 @@ public class MainFragment extends BrowseSupportFragment {
                 private int deliveredFirstRaw = currentMediaList.get(0).getBrowseRawOffset();
                 private int deliveredLastRaw = currentMediaList.get(currentMediaList.size() - 1).getBrowseRawOffset();
                 private String anchorBoundary;
-                private final DetailScanContinuation scanContinuation = new DetailScanContinuation();
+                private DetailScanContinuation scanContinuation = new DetailScanContinuation();
                 @Override public boolean isWindowed() { return true; }
                 @Override public void setAnchor(MediaItem item) {
                     detailAnchorId = item.getId();
@@ -2793,6 +2793,42 @@ public class MainFragment extends BrowseSupportFragment {
                     if (photoPaging.isStalled()) return "服务器返回重复或矛盾空页；结果可能不完整，请刷新";
                     if (photoPaging.isOffsetLimited()) return "已到接口偏移上限，请缩小查询范围";
                     return null;
+                }
+                @Override public boolean supportsRestart() {
+                    return active() && photoPaging != null && getBoundaryMessage() == null;
+                }
+                @Override public void restart(final MediaListHolder.PageCallback callback) {
+                    if (!supportsRestart() || photoPaging.isLoading() || applyingPage
+                            || detailPageCallback != null) {
+                        callback.onFailure();
+                        return;
+                    }
+                    // Same range/query generation and API parameters, fresh raw offset zero.
+                    // Do not use startPhotoPaging: entry focus and navigation are not new here.
+                    photoWindow = new SlidingPhotoWindow(560, 16);
+                    photoPaging = new MainPagingState(photoPageSize());
+                    loadingPreviousPhotos = false;
+                    previousScanPaused = false;
+                    photoScan.reset();
+                    photoPageDemand.reset();
+                    scanContinuation = new DetailScanContinuation();
+                    anchorBoundary = null;
+                    currentMediaList = new ArrayList<>();
+                    photoPositions.clear();
+                    initialPhotoFocusPending = false;
+                    resetPagedRows();
+                    detailPageCallback = new MediaListHolder.PageCallback() {
+                        @Override public void onLoaded(List<MediaItem> ignored, boolean more) {
+                            if (!active()) { callback.onFailure(); return; }
+                            // No old anchor appended: these rows genuinely start at offset zero.
+                            deliver(new ArrayList<>(currentMediaList), callback);
+                        }
+                        @Override public void onFailure() { callback.onFailure(); }
+                        @Override public void onPaused(String message) { callback.onPaused(message); }
+                    };
+                    loadPhotoPage(true);
+                    // Explicit sparse scanning must not claim an initial-entry focus gesture.
+                    initialPhotoFocusPending = false;
                 }
                 @Override public void loadMore(MediaListHolder.PageCallback callback) {
                     requestDetailPage(false, callback);

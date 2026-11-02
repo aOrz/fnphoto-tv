@@ -20,6 +20,7 @@ final class VideoControls {
         void togglePlayback();
         void navigate(boolean next);
         void close();
+        default void slideshow() { }
     }
 
     private final LinearLayout panel;
@@ -74,8 +75,9 @@ final class VideoControls {
         forward = button(context, actions, R.string.video_forward, v -> listener.seekBy(10000));
         Button next = button(context, actions, R.string.video_next, v -> listener.navigate(true));
         next.setContentDescription(context.getString(R.string.video_next_description));
+        Button slideshow = button(context, actions, R.string.slideshow_settings, v -> listener.slideshow());
         Button close = button(context, actions, R.string.video_close_controls, v -> listener.close());
-        Button[] buttons = {previous, rewind, play, forward, next, close};
+        Button[] buttons = {previous, rewind, play, forward, next, slideshow, close};
         for (int i = 0; i < buttons.length; i++) {
             buttons[i].setNextFocusLeftId(buttons[Math.max(0, i - 1)].getId());
             buttons[i].setNextFocusRightId(buttons[Math.min(buttons.length - 1, i + 1)].getId());

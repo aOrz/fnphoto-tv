@@ -716,6 +716,19 @@ public class FolderBrowseActivity extends FragmentActivity {
                 return destroyed || generation != dataGeneration ? "原列表已切换，请返回列表重新选择"
                         : pages.boundaryMessage();
             }
+            @Override public boolean supportsRestart() {
+                return !destroyed && generation == dataGeneration && !pages.isLoading()
+                        && !pages.hasMore() && !pages.hasError() && pages.boundaryMessage() == null
+                        && pages.getOffset() == pages.getWindowRows();
+            }
+            @Override public void restart(MediaListHolder.PageCallback callback) {
+                if (!supportsRestart()) {
+                    callback.onPaused("当前批次不是完整列表，无法循环；请返回列表重新开始");
+                    return;
+                }
+                delivery.delivered(mediaItems.size());
+                callback.onLoaded(toMediaItems(), false);
+            }
             @Override public void loadMore(MediaListHolder.PageCallback callback) {
                 if (destroyed || generation != dataGeneration) { callback.onFailure(); return; }
                 if (delivery.hasBuffered(mediaItems.size()) || !pages.hasMore()) {

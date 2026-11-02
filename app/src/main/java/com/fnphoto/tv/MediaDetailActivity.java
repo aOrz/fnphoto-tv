@@ -57,7 +57,6 @@ import retrofit2.converter.gson.GsonConverterFactory;
 public class MediaDetailActivity extends FragmentActivity {
     private static final String TAG = "MediaDetailActivity";
     private static final long DEBOUNCE_TIME = 300;
-    private static final long SLIDESHOW_INTERVAL = 5000;
     private static final long VIDEO_WAIT_TIMEOUT_MS = 15000;
     private static final float ZOOM_STEP = 0.25f;
     private static final float MAX_SCALE = 5.0f;
@@ -127,8 +126,11 @@ public class MediaDetailActivity extends FragmentActivity {
     private boolean canSwitch = true;
     private boolean isVideoPlaying = false;
     private MediaItem currentVideoItem;
-    private boolean slideshowActive = false;
+    private final SlideshowState slideshow = new SlideshowState();
+    private android.app.AlertDialog slideshowDialog;
     private boolean currentPhotoReady;
+    private boolean skippingVideo;
+    private String suppressedVideoId;
     private boolean infoVisible = false;
     private float currentScale = 1.0f;
     private boolean isZoomed = false;
@@ -154,6 +156,9 @@ public class MediaDetailActivity extends FragmentActivity {
         SharedPreferences prefs = getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE);
         baseUrl = prefs.getString("nas_url", "");
         token = prefs.getString("api_token", "");
+        slideshow.setSeconds(prefs.getInt("slideshow_seconds", 5));
+        slideshow.setLoop(prefs.getBoolean("slideshow_loop", false));
+        slideshow.setVideos(prefs.getBoolean("slideshow_videos", true));
         // Scope snapshots to the login session without writing credentials to the file.
         sessionOwner = activeSessionOwner();
         mediaSourceEndpoint = baseUrl;
@@ -198,6 +203,7 @@ public class MediaDetailActivity extends FragmentActivity {
             api = retrofit.create(FnHttpApi.class);
         }
 
+        suppressedVideoId = savedInstanceState != null ? savedInstanceState.getString("SKIPPED_VIDEO_ID") : null;
         String savedError = savedInstanceState != null
                 ? savedInstanceState.getString("VIDEO_ERROR_MESSAGE") : null;
         if (savedError != null && "video".equals(mediaList.get(currentIndex).getType())) {
@@ -218,10 +224,13 @@ public class MediaDetailActivity extends FragmentActivity {
     private void showCurrentMedia() {
         if (currentIndex < 0 || currentIndex >= mediaList.size()) return;
 
+        slideshow.mediaChanged();
         MediaItem item = mediaList.get(currentIndex);
         displayedMediaId = item.getId();
+        if (!item.getId().equals(suppressedVideoId)) suppressedVideoId = null;
         slideshowHandler.removeCallbacks(slideshowRunnable);
         currentPhotoReady = false;
+        skippingVideo = false;
         Log.d(TAG, "Showing media: " + item.getTitle() + " type: " + item.getType());
 
         loadState.next();
@@ -241,9 +250,27 @@ public class MediaDetailActivity extends FragmentActivity {
         hideInfoOverlay();
         showLoading();
 
-        if (slideshowActive) showSlideshowIndicator(true);
+        if (slideshow.active()) showSlideshowIndicator(true);
+        if (slideshow.running() && !slideshow.accepts(item)) {
+            skippingVideo = true;
+            suppressedVideoId = item.getId();
+            currentVideoItem = item;
+            if (!slideshow.skip()) {
+                pauseSlideshow();
+                hideLoading();
+                showSkippedVideoStatus("已跳过175项视频，已暂停\n确定继续扫描 · 菜单设置 · 返回退出");
+            } else slideshowHandler.post(slideshowRunnable);
+            return;
+        }
+        if (!slideshow.running() && "video".equals(item.getType()) && item.getId().equals(suppressedVideoId)) {
+            skippingVideo = true;
+            currentVideoItem = item;
+            showSkippedVideoStatus("当前视频未播放\n确定手动播放 · 菜单设置 · 返回退出");
+            return;
+        }
+        if (slideshow.running()) slideshow.displayed();
         if ("video".equals(item.getType())) {
-            if (slideshowActive) startVideoPlayback(item);
+            if (slideshow.running()) startVideoPlayback(item);
             else showVideoPreview(item);
         } else {
             showPhoto(item);
@@ -281,6 +308,7 @@ public class MediaDetailActivity extends FragmentActivity {
         container.addView(view);
         if (loadingIndicator != null) loadingIndicator.bringToFront();
         imageView = view;
+        if (slideshow.active()) showSlideshowIndicator(true);
         return view;
     }
 
@@ -421,6 +449,8 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void startVideoPlayback(MediaItem item) {
+        skippingVideo = false;
+        suppressedVideoId = null;
         loadState.next();
         clearImageRequests();
         releasePlayers();
@@ -431,7 +461,7 @@ public class MediaDetailActivity extends FragmentActivity {
 
         container.removeAllViews();
         showLoading();
-        if (slideshowActive) showSlideshowIndicator(true);
+        if (slideshow.running()) showSlideshowIndicator(true);
 
         String videoId = item.getId();
         SharedPreferences currentPrefs = getSharedPreferences("fn_photo_prefs", MODE_PRIVATE);
@@ -492,12 +522,13 @@ public class MediaDetailActivity extends FragmentActivity {
                     }
                     if (playbackState == Player.STATE_ENDED) {
                         clearVideoTimeout();
-                        if (slideshowActive) {
+                        slideshow.completed();
+                        if (slideshow.running()) {
                             switchToNext();
                         }
                         // Match the platform player's completed state: rewinding from the end
                         // stays paused until an explicit Play/OK, instead of silently resuming.
-                        if (!slideshowActive && player == requestedPlayer && playWhenReady) {
+                        if (!slideshow.running() && player == requestedPlayer && playWhenReady) {
                             requestedPlayer.setPlayWhenReady(false);
                         }
                     }
@@ -628,7 +659,8 @@ public class MediaDetailActivity extends FragmentActivity {
                 if (!loadState.isCurrent(generation) || fallbackPlayer != mp2) return;
                 clearVideoTimeout();
                 fallbackPlayback.setPlayWhenReady(false);
-                if (slideshowActive) {
+                slideshow.completed();
+                if (slideshow.running()) {
                     switchToNext();
                 }
             });
@@ -653,15 +685,17 @@ public class MediaDetailActivity extends FragmentActivity {
             @Override public void togglePlayback() { setVideoPlaying(null); }
             @Override public void navigate(boolean next) { navigateManually(next); }
             @Override public void close() { hideVideoControls(); }
+            @Override public void slideshow() { showSlideshowSettings(); }
         });
         videoSurface.requestFocus();
         controlsHandler.post(refreshVideoControls);
         showVideoHint(getString(R.string.video_remote_help));
+        if (slideshow.active()) showSlideshowIndicator(true);
     }
 
     private void showVideoControls() {
         if (videoControls == null) return;
-        stopAutomaticAdvance();
+        if (slideshow.running()) pauseSlideshow();
         updateVideoControls();
         videoSurface.setFocusable(false);
         videoControls.show();
@@ -723,7 +757,7 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void stopAutomaticAdvance() {
-        if (slideshowActive) stopSlideshow();
+        if (slideshow.active()) stopSlideshow();
     }
 
     private void navigateManually(boolean next) {
@@ -768,8 +802,15 @@ public class MediaDetailActivity extends FragmentActivity {
 
     /** null toggles; dedicated PLAY/PAUSE are idempotent, including while preparing. */
     private void setVideoPlaying(Boolean requested) {
-        stopAutomaticAdvance();
-        boolean play = requested != null ? requested : !videoPlayRequested();
+        if (slideshow.active()) {
+            boolean play = requested != null ? requested : slideshow.paused();
+            if (play) resumeSlideshow(); else pauseSlideshow();
+            return;
+        }
+        applyVideoPlaying(requested != null ? requested : !videoPlayRequested());
+    }
+
+    private void applyVideoPlaying(boolean play) {
         try {
             if (player != null) {
                 if (play && player.getPlaybackState() == Player.STATE_ENDED) player.seekTo(0);
@@ -817,7 +858,7 @@ public class MediaDetailActivity extends FragmentActivity {
         clearImageRequests();
         releasePlayers();
         isVideoPlaying = false;
-        if (slideshowActive) stopSlideshow();
+        if (slideshow.active()) stopSlideshow();
         hideInfoOverlay();
         videoErrorMessage = message;
         container.removeAllViews();
@@ -866,7 +907,7 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void switchToPrevious() {
-        if (!canSwitch || slideshowActive || (pageController != null && pageController.isLoading())) return;
+        if (!canSwitch || slideshow.running() || (pageController != null && pageController.isLoading())) return;
         reconcileMediaIndex();
         if (currentIndex > 0) {
             currentIndex--;
@@ -881,12 +922,12 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void switchToNext() {
-        if ((!canSwitch && !slideshowActive) || (pageController != null && pageController.isLoading())) return;
+        if ((!canSwitch && !slideshow.running()) || (pageController != null && pageController.isLoading())) return;
         reconcileMediaIndex();
         if (currentIndex < mediaList.size() - 1) {
             currentIndex++;
             showCurrentMedia();
-            if (!slideshowActive) debounceSwitch();
+            if (!slideshow.running()) debounceSwitch();
         } else if (pageController != null && pageController.hasMore()) {
             requestNavigationPage(true);
         } else {
@@ -912,7 +953,7 @@ public class MediaDetailActivity extends FragmentActivity {
                 reconcileMediaIndex();
                 if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
                 hideLoading();
-                if (slideshowActive) stopSlideshow();
+                if (slideshow.active()) stopSlideshow();
                 Toast.makeText(MediaDetailActivity.this, forward
                         ? (isVideoPlaying ? "加载下一页失败，请在操作栏选择下一项重试" : "加载下一页失败，按右键重试")
                         : (isVideoPlaying ? "加载上一页失败，请在操作栏选择上一项重试" : "加载上一页失败，按左键重试"), Toast.LENGTH_LONG).show();
@@ -921,7 +962,7 @@ public class MediaDetailActivity extends FragmentActivity {
                 reconcileMediaIndex();
                 if (!loadState.isCurrent(generation) || !navigationState.isCurrent(navigation)) return;
                 hideLoading();
-                if (slideshowActive) stopSlideshow();
+                if (slideshow.active()) stopSlideshow();
                 Toast.makeText(MediaDetailActivity.this, message + (isVideoPlaying
                         ? "；在操作栏选择" + (forward ? "下一项" : "上一项") + "继续扫描或返回退出"
                         : "；按" + (forward ? "右键" : "左键") + "继续扫描或返回退出"), Toast.LENGTH_LONG).show();
@@ -945,11 +986,15 @@ public class MediaDetailActivity extends FragmentActivity {
     private void finishNavigation() {
             String boundary = pageController == null ? null : pageController.getBoundaryMessage();
             if (boundary != null) {
-                if (slideshowActive) stopSlideshow();
+                if (slideshow.active()) stopSlideshow();
                 Toast.makeText(this, boundary, Toast.LENGTH_LONG).show();
                 return;
             }
-            if (slideshowActive) {
+            if (slideshow.running()) {
+                if (slideshow.loop() && slideshow.beginLoop()) {
+                    restartSlideshowRange();
+                    return;
+                }
                 stopSlideshow();
                 Toast.makeText(this, "幻灯片播放结束", Toast.LENGTH_SHORT).show();
             } else {
@@ -963,46 +1008,206 @@ public class MediaDetailActivity extends FragmentActivity {
     }
 
     private void toggleSlideshow() {
-        if (slideshowActive) {
-            stopSlideshow();
-        } else {
-            startSlideshow();
-        }
+        if (slideshow.paused()) resumeSlideshow();
+        else if (slideshow.running()) pauseSlideshow();
+        else startSlideshow();
     }
 
     private void startSlideshow() {
-        if (mediaList.size() <= 1 && (pageController == null || !pageController.hasMore())) {
-            Toast.makeText(this, "需要至少2张照片才能播放幻灯片", Toast.LENGTH_SHORT).show();
+        if (mediaList == null || mediaList.isEmpty()) return;
+        if (pageController != null && pageController.isLoading()) {
+            Toast.makeText(this, "仍在加载，请稍后开始", Toast.LENGTH_SHORT).show();
             return;
         }
-        slideshowActive = true;
+        slideshow.start();
         canSwitch = true;
         debounceHandler.removeCallbacksAndMessages(null);
         showSlideshowIndicator(true);
-        if (currentVideoItem != null && !isVideoPlaying) startVideoPlayback(currentVideoItem);
-        else schedulePhotoSlideshow();
-        Toast.makeText(this, "幻灯片已开始", Toast.LENGTH_SHORT).show();
+        continueSlideshow();
+    }
+
+    private void continueSlideshow() {
+        if (!slideshow.running()) return;
+        reconcileMediaIndex();
+        if (!slideshow.accepts(mediaList.get(currentIndex))) {
+            showCurrentMedia();
+        } else if (currentVideoItem != null) {
+            slideshow.displayed();
+            applyVideoPlaying(true);
+        } else schedulePhotoSlideshow();
+    }
+
+    private void pauseSlideshow() {
+        if (!slideshow.active()) return;
+        slideshow.pause();
+        navigationState.next();
+        slideshowHandler.removeCallbacks(slideshowRunnable);
+        if (pageController != null && pageController.isLoading()) hideLoading();
+        if (currentVideoItem != null && isVideoPlaying) applyVideoPlaying(false);
+        showSlideshowIndicator(true);
+        if (skippingVideo) showSkippedVideoStatus("已暂停跳过视频\n确定继续 · 菜单设置 · 返回退出");
+    }
+
+    private void resumeSlideshow() {
+        if (!slideshow.paused()) return;
+        // An in-flight page may update its bounded cache, but it cannot advance a paused session.
+        if (pageController != null && pageController.isLoading()) {
+            Toast.makeText(this, "仍在加载，请稍后确定继续", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        slideshow.resume();
+        showSlideshowIndicator(true);
+        if (pageController != null && pageController.commitRestart()) {
+            currentIndex = 0;
+            showCurrentMedia();
+        } else if (slideshow.advancePending()) {
+            switchToNext();
+        } else continueSlideshow();
     }
 
     private void stopSlideshow() {
+        if (slideshow.active() && currentVideoItem != null) suppressedVideoId = currentVideoItem.getId();
         navigationState.next();
         if (pageController != null && pageController.isLoading()) hideLoading();
-        slideshowActive = false;
+        slideshow.stop();
+        if (pageController != null) pageController.discardRestart();
         slideshowHandler.removeCallbacks(slideshowRunnable);
         showSlideshowIndicator(false);
-        Toast.makeText(this, "幻灯片已停止", Toast.LENGTH_SHORT).show();
+        hideLoading();
+        if (skippingVideo) showSkippedVideoStatus("幻灯片已停止，当前视频未播放\n确定手动播放 · 菜单设置 · 返回退出");
+    }
+
+    private void showSkippedVideoStatus(String message) {
+        hideLoading();
+        container.removeAllViews();
+        TextView status = new TextView(this);
+        status.setText(message);
+        status.setTextColor(Color.WHITE);
+        status.setTextSize(22);
+        status.setGravity(Gravity.CENTER);
+        container.addView(status, new FrameLayout.LayoutParams(-1, -1));
+        container.requestFocus();
+        if (slideshow.active()) showSlideshowIndicator(true);
     }
 
     private void schedulePhotoSlideshow() {
         slideshowHandler.removeCallbacks(slideshowRunnable);
-        if (slideshowActive && !isVideoPlaying && currentPhotoReady) {
-            slideshowHandler.postDelayed(slideshowRunnable, SLIDESHOW_INTERVAL);
+        if (slideshow.running() && !isVideoPlaying && currentPhotoReady) {
+            slideshowHandler.postDelayed(slideshowRunnable, slideshow.seconds() * 1000L);
         }
+    }
+
+    private void restartSlideshowRange() {
+        String unavailable = restoredWithoutPaging
+                ? "恢复的快照不包含完整范围，请返回列表重新打开后循环"
+                : pageController.getRestartUnavailableMessage();
+        if (unavailable != null) {
+            stopSlideshow();
+            Toast.makeText(this, unavailable, Toast.LENGTH_LONG).show();
+            return;
+        }
+        final long navigation = navigationState.next();
+        showLoading();
+        pageController.restart(new MediaPageController.Callback() {
+            @Override public void onReady(boolean available) {
+                if (!navigationState.isCurrent(navigation) || !slideshow.running()) return;
+                hideLoading();
+                if (available && pageController.commitRestart()) {
+                    currentIndex = 0;
+                    showCurrentMedia();
+                } else {
+                    stopSlideshow();
+                    Toast.makeText(MediaDetailActivity.this, "当前范围没有可播放内容", Toast.LENGTH_LONG).show();
+                }
+            }
+            @Override public void onFailure() { failed("重新加载播放范围失败，请返回列表或重新开始"); }
+            @Override public void onPaused(String message) { failed(message); }
+            private void failed(String message) {
+                if (!navigationState.isCurrent(navigation) || !slideshow.running()) return;
+                hideLoading();
+                stopSlideshow();
+                Toast.makeText(MediaDetailActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void showSlideshowSettings() {
+        if (slideshowDialog != null || infoVisible) return;
+        if (slideshow.running()) pauseSlideshow();
+        else if (!slideshow.active() && isVideoPlaying) applyVideoPlaying(false);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(24, 12, 24, 12);
+        Button interval = new Button(this);
+        interval.setText("照片间隔：" + slideshow.seconds() + " 秒");
+        interval.setOnClickListener(v -> {
+            int next = 0;
+            for (int i = 0; i < SlideshowState.INTERVALS.length; i++)
+                if (SlideshowState.INTERVALS[i] == slideshow.seconds()) next = (i + 1) % SlideshowState.INTERVALS.length;
+            slideshow.setSeconds(SlideshowState.INTERVALS[next]);
+            interval.setText("照片间隔：" + slideshow.seconds() + " 秒");
+            saveSlideshowPreferences();
+        });
+        Button loop = new Button(this);
+        loop.setText("循环当前范围：" + (slideshow.loop() ? "开" : "关"));
+        loop.setOnClickListener(v -> {
+            slideshow.setLoop(!slideshow.loop());
+            loop.setText("循环当前范围：" + (slideshow.loop() ? "开" : "关"));
+            saveSlideshowPreferences();
+        });
+        Button videos = new Button(this);
+        videos.setText("播放视频：" + (slideshow.videos() ? "开" : "关（跳过视频）"));
+        videos.setOnClickListener(v -> {
+            slideshow.setVideos(!slideshow.videos());
+            videos.setText("播放视频：" + (slideshow.videos() ? "开" : "关（跳过视频）"));
+            saveSlideshowPreferences();
+        });
+        for (Button button : new Button[] {interval, loop, videos}) {
+            styleSlideshowButton(button);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.setMargins(0, 6, 0, 6);
+            panel.addView(button, params);
+        }
+        slideshowDialog = new android.app.AlertDialog.Builder(this)
+                .setTitle("幻灯片 · 当前相册/列表")
+                .setView(panel)
+                .setPositiveButton(slideshow.active() ? "继续播放" : "开始播放", (dialog, which) -> {
+                    if (slideshow.paused()) resumeSlideshow(); else startSlideshow();
+                })
+                .setNegativeButton("关闭", (dialog, which) -> { })
+                .setNeutralButton("结束幻灯片", (dialog, which) -> stopSlideshow())
+                .create();
+        slideshowDialog.setOnDismissListener(dialog -> {
+            slideshowDialog = null;
+            if (videoControls != null && videoControls.isVisible()) videoControls.focus();
+            else container.requestFocus();
+        });
+        slideshowDialog.setOnShowListener(dialog -> {
+            styleSlideshowButton(slideshowDialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE));
+            styleSlideshowButton(slideshowDialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE));
+            styleSlideshowButton(slideshowDialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL));
+            interval.requestFocus();
+        });
+        slideshowDialog.show();
+    }
+
+    private void styleSlideshowButton(Button button) {
+        button.setTextColor(Color.WHITE);
+        button.setAllCaps(false);
+        button.setBackgroundResource(R.drawable.bg_pill_button);
+        button.setFocusableInTouchMode(true);
+    }
+
+    private void saveSlideshowPreferences() {
+        getSharedPreferences("fn_photo_prefs", MODE_PRIVATE).edit()
+                .putInt("slideshow_seconds", slideshow.seconds())
+                .putBoolean("slideshow_loop", slideshow.loop())
+                .putBoolean("slideshow_videos", slideshow.videos()).apply();
     }
 
     private final Runnable slideshowRunnable = new Runnable() {
         @Override public void run() {
-            if (slideshowActive && !isVideoPlaying) switchToNext();
+            if (slideshow.running() && !isVideoPlaying) switchToNext();
             // The next photo schedules its own full interval after loading. Videos advance on ended.
         }
     };
@@ -1011,7 +1216,6 @@ public class MediaDetailActivity extends FragmentActivity {
         if (show) {
             if (tvSlideshowIndicator == null) {
                 tvSlideshowIndicator = new TextView(this);
-                tvSlideshowIndicator.setText("▶ 幻灯片播放中");
                 tvSlideshowIndicator.setTextColor(Color.WHITE);
                 tvSlideshowIndicator.setTextSize(16);
                 tvSlideshowIndicator.setBackgroundColor(Color.parseColor("#80000000"));
@@ -1026,7 +1230,10 @@ public class MediaDetailActivity extends FragmentActivity {
             if (tvSlideshowIndicator.getParent() == null) {
                 container.addView(tvSlideshowIndicator);
             }
+            tvSlideshowIndicator.setText((slideshow.paused() ? "Ⅱ 已暂停" : "▶ 幻灯片")
+                    + " · " + slideshow.seconds() + "秒 · 确定暂停/继续 · 菜单设置");
             tvSlideshowIndicator.setVisibility(View.VISIBLE);
+            tvSlideshowIndicator.bringToFront();
         } else {
             if (tvSlideshowIndicator != null) {
                 tvSlideshowIndicator.setVisibility(View.GONE);
@@ -1257,6 +1464,20 @@ public class MediaDetailActivity extends FragmentActivity {
         if (event.getAction() != KeyEvent.ACTION_DOWN && event.getAction() != KeyEvent.ACTION_UP) {
             return super.dispatchKeyEvent(event);
         }
+        if (event.getKeyCode() == KeyEvent.KEYCODE_MENU && (!isVideoPlaying || slideshow.active())) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) showSlideshowSettings();
+            return true;
+        }
+        if (slideshow.active() && (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY
+                || event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PAUSE
+                || event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                if (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY) resumeSlideshow();
+                else if (event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PAUSE) pauseSlideshow();
+                else toggleSlideshow();
+            }
+            return true;
+        }
         VideoRemoteInput.Mode mode = !isVideoPlaying ? VideoRemoteInput.Mode.BROWSE
                 : videoControls != null && videoControls.isVisible()
                 ? VideoRemoteInput.Mode.CONTROLS : VideoRemoteInput.Mode.VIDEO;
@@ -1278,7 +1499,7 @@ public class MediaDetailActivity extends FragmentActivity {
             case NEXT: if (!infoVisible) navigateManually(true); break;
             case EXIT: finish(); break;
             case PHOTO_SLIDESHOW:
-                if (!infoVisible && currentVideoItem == null && !slideshowActive) startSlideshow();
+                if (!infoVisible && currentVideoItem == null && !slideshow.running()) startSlideshow();
                 break;
             default: break;
         }
@@ -1348,9 +1569,10 @@ public class MediaDetailActivity extends FragmentActivity {
             return true;
         }
 
-        if (slideshowActive) {
-            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-                stopSlideshow();
+        if (slideshow.active()) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
+                    || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (event.getRepeatCount() == 0) toggleSlideshow();
                 return true;
             }
             if (keyCode == KeyEvent.KEYCODE_BACK) {
@@ -1431,6 +1653,8 @@ public class MediaDetailActivity extends FragmentActivity {
     @Override protected void onSaveInstanceState(Bundle outState) {
         reconcileMediaIndex();
         outState.putString("DETAIL_MEDIA_ID", displayedMediaId);
+        outState.putString("SKIPPED_VIDEO_ID", slideshow.active() && currentVideoItem != null
+                ? currentVideoItem.getId() : suppressedVideoId);
         if (videoErrorMessage != null) outState.putString("VIDEO_ERROR_MESSAGE", videoErrorMessage);
         outState.putInt("DETAIL_INDEX", currentIndex);
         if (sessionStore != null && mediaList != null && !mediaList.isEmpty()) {
@@ -1467,6 +1691,8 @@ public class MediaDetailActivity extends FragmentActivity {
 
     @Override
     protected void onStop() {
+        if (slideshow.active() && currentVideoItem != null) suppressedVideoId = currentVideoItem.getId();
+        if (slideshowDialog != null) slideshowDialog.dismiss();
         if (collectCall != null) collectCall.cancel();
         collectCall = null;
         collectPending = false;
@@ -1475,7 +1701,8 @@ public class MediaDetailActivity extends FragmentActivity {
         clearImageRequests();
         releasePlayers();
         playbackHandler.removeCallbacksAndMessages(null);
-        slideshowActive = false;
+        slideshow.stop();
+        if (pageController != null) pageController.discardRestart();
         slideshowHandler.removeCallbacksAndMessages(null);
         debounceHandler.removeCallbacksAndMessages(null);
         canSwitch = true;
