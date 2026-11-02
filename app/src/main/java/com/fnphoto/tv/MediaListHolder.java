@@ -20,6 +20,12 @@ public class MediaListHolder {
         default boolean hasPrevious() { return false; }
         default void loadPrevious(PageCallback callback) { callback.onFailure(); }
         void loadMore(PageCallback callback);
+        /** Explicit whole-range restart; false means a resident window is not a full range. */
+        default boolean supportsRestart() { return false; }
+        /** Delivers a replacement starting at the actual range start, not the resident window. */
+        default void restart(PageCallback callback) {
+            callback.onPaused("当前来源不能可靠回到列表开头，请返回列表重新开始");
+        }
         /** A window/protocol boundary must not be presented as the end of the library. */
         default String getBoundaryMessage() { return null; }
     }

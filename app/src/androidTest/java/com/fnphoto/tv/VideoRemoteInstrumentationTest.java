@@ -22,6 +22,8 @@ import java.lang.reflect.Field;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -38,8 +40,10 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
     private static final String ENDPOINT = "http://10.0.2.2:5666";
     private MediaDetailActivity activity;
     private SharedPreferences preferences;
-    private final Map<String, String> original = new HashMap<>();
-    private static final String[] PREF_KEYS = {"nas_url", "api_token", "saved_source", "login_session"};
+    private DelayedPageSource delayedPageSource;
+    private final Map<String, Object> original = new HashMap<>();
+    private static final String[] PREF_KEYS = {"nas_url", "api_token", "saved_source", "login_session",
+            "slideshow_seconds", "slideshow_loop", "slideshow_videos"};
 
     @Override protected void setUp() throws Exception {
         super.setUp();
@@ -53,13 +57,20 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
         assertTrue("Refusing a device configured for a non-fixture NAS",
                 endpoint.isEmpty() || ENDPOINT.equals(endpoint));
         SharedPreferences.Editor editor = preferences.edit();
-        for (String key : PREF_KEYS) original.put(key, preferences.contains(key) ? preferences.getString(key, "") : null);
+        for (String key : PREF_KEYS) original.put(key, preferences.getAll().get(key));
         assertTrue(editor.putString("nas_url", ENDPOINT).putString("api_token", "synthetic-remote-test")
-                .putString("saved_source", ENDPOINT).putString("login_session", "synthetic-remote-test").commit());
+                .putString("saved_source", ENDPOINT).putString("login_session", "synthetic-remote-test")
+                .putInt("slideshow_seconds", 5).putBoolean("slideshow_loop", false)
+                .putBoolean("slideshow_videos", true).commit());
         ui(() -> {
             String photo = ENDPOINT + "/p/api/v1/stream/p/t/152/o/synthetic?size=m";
-            MediaListHolder.set(Arrays.asList(
-                    new MediaItem("151", "Synthetic video A", "video", null, ENDPOINT + "/p/api/v1/stream/v/151"),
+            MediaItem firstVideo = new MediaItem("151", "Synthetic video A", "video", null,
+                    ENDPOINT + "/p/api/v1/stream/v/151");
+            if ("testSlideshowEndedVideoPausedWhilePagingResumesIntoNextPhoto".equals(getName())) {
+                delayedPageSource = new DelayedPageSource();
+                MediaListHolder.set(Collections.singletonList(firstVideo), delayedPageSource);
+            } else MediaListHolder.set(Arrays.asList(
+                    firstVideo,
                     new MediaItem("152", "Synthetic photo", "photo", photo, photo),
                     new MediaItem("314", "Synthetic video B", "video", null, ENDPOINT + "/p/api/v1/stream/v/314")));
             return null;
@@ -81,8 +92,11 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
             if (preferences != null && !original.isEmpty()) {
                 SharedPreferences.Editor editor = preferences.edit();
                 for (String key : PREF_KEYS) {
-                    if (original.get(key) == null) editor.remove(key);
-                    else editor.putString(key, original.get(key));
+                    Object value = original.get(key);
+                    if (value == null) editor.remove(key);
+                    else if (value instanceof Boolean) editor.putBoolean(key, (Boolean) value);
+                    else if (value instanceof Integer) editor.putInt(key, (Integer) value);
+                    else editor.putString(key, (String) value);
                 }
                 editor.commit();
             }
@@ -233,6 +247,149 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
         assertEquals(0, snapshot().index);
     }
 
+    public void testSlideshowVideoPauseResumeAndEndedAdvance() throws Exception {
+        key(KeyEvent.KEYCODE_MENU);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertFocus(R.string.slideshow_settings);
+        ui(() -> {
+            TextView button = (TextView) activity.getCurrentFocus();
+            assertEquals("Slideshow action must fit on one line on narrow API19 layouts", 1, button.getLineCount());
+            assertNotNull(button.getLayout());
+            assertEquals("Slideshow action must not be ellipsized", 0, button.getLayout().getEllipsisCount(0));
+            return null;
+        });
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        ui(() -> {
+            android.app.AlertDialog dialog = (android.app.AlertDialog) field(activity, "slideshowDialog");
+            assertNotNull(dialog);
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).requestFocus();
+            return null;
+        });
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).running()));
+        assertTrue(snapshot().playRequested);
+        key(KeyEvent.KEYCODE_MEDIA_PAUSE);
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).paused()));
+        awaitStableSlideshowPause();
+        long pausedPosition = snapshot().position;
+        int pausedFrames = ui(() -> player().getVideoDecoderCounters().renderedOutputBufferCount);
+        saveScreenshot("slideshow-video-paused.png");
+        SystemClock.sleep(2000);
+        assertEquals("Video playback clock must freeze", pausedPosition, snapshot().position, 100);
+        assertEquals("No decoded output frames while paused", pausedFrames,
+                (int) ui(() -> player().getVideoDecoderCounters().renderedOutputBufferCount));
+        key(KeyEvent.KEYCODE_MEDIA_PLAY);
+        waitFor("resumed video really renders", () -> player().getVideoDecoderCounters().renderedOutputBufferCount > pausedFrames
+                && player().getCurrentPosition() > pausedPosition + 500);
+        saveScreenshot("slideshow-video-resumed.png");
+        // Arrange the end while preserving slideshow intent; the ended callback is production code.
+        ui(() -> { player().seekTo(player().getDuration() - 1000); return null; });
+        waitFor("video completion advances to photo exactly once", () -> (Integer) field(activity, "currentIndex") == 1);
+        key(KeyEvent.KEYCODE_MEDIA_PAUSE);
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).paused()));
+        assertNull(ui(() -> player()));
+        saveScreenshot("slideshow-video-ended-photo.png");
+    }
+
+    public void testSlideshowEndedVideoPausedWhilePagingResumesIntoNextPhoto() throws Exception {
+        assertNotNull(delayedPageSource);
+        // Start through the production remote menu, not a reflective startSlideshow() call.
+        key(KeyEvent.KEYCODE_MENU);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        assertFocus(R.string.slideshow_settings);
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        ui(() -> {
+            android.app.AlertDialog dialog = (android.app.AlertDialog) field(activity, "slideshowDialog");
+            assertNotNull(dialog);
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).requestFocus();
+            return null;
+        });
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).running()));
+        // Only arrange position. Natural decode/completion and next-page demand are real callbacks.
+        ui(() -> { player().seekTo(player().getDuration() - 1000); return null; });
+        waitFor("ended video awaiting delayed next page", () -> player() != null
+                && player().getPlaybackState() == Player.STATE_ENDED && delayedPageSource.pending != null);
+        assertEquals(1, (int) ui(() -> delayedPageSource.requests));
+        key(KeyEvent.KEYCODE_MEDIA_PAUSE);
+        key(KeyEvent.KEYCODE_MEDIA_PAUSE); // Repeated pause must preserve pending completion intent.
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).paused()));
+        assertEquals(0, snapshot().index);
+        ui(() -> {
+            String photo = ENDPOINT + "/p/api/v1/stream/p/t/152/o/synthetic?size=m";
+            delayedPageSource.deliver(Arrays.asList(
+                    new MediaItem("151", "Synthetic video A", "video", null, ENDPOINT + "/p/api/v1/stream/v/151"),
+                    new MediaItem("152", "Synthetic photo", "photo", photo, photo)));
+            return null;
+        });
+        assertTrue(ui(() -> ((SlideshowState) field(activity, "slideshow")).paused()));
+        assertEquals("Delivery while paused must not navigate", 0, snapshot().index);
+        SimpleExoPlayer endedPlayer = ui(() -> player());
+        assertNotNull(endedPlayer);
+        assertEquals(Player.STATE_ENDED, (int) ui(() -> endedPlayer.getPlaybackState()));
+        final boolean[] replayed = {false};
+        Player.EventListener listener = new Player.EventListener() {
+            @Override public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+                if (playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_READY)
+                    replayed[0] = true;
+            }
+        };
+        ui(() -> { endedPlayer.addListener(listener); return null; });
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        key(KeyEvent.KEYCODE_MEDIA_PLAY);
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertFalse("Resuming completed video must advance, never replay the ended clip", ui(() -> replayed[0]));
+            if (snapshot().index == 1) break;
+            SystemClock.sleep(50);
+        }
+        assertFalse("Ended clip was replayed while resuming slideshow", ui(() -> replayed[0]));
+        assertEquals("Within five seconds resume must enter the delivered next photo", 1, snapshot().index);
+        assertNull("The ended video's player must be released", ui(() -> player()));
+        key(KeyEvent.KEYCODE_MEDIA_PAUSE);
+        saveScreenshot("slideshow-ended-paging-resume-photo.png");
+    }
+
+    private static final class DelayedPageSource implements MediaListHolder.PageSource {
+        MediaListHolder.PageCallback pending;
+        int requests;
+        boolean more = true;
+        @Override public boolean hasMore() { return more; }
+        @Override public void loadMore(MediaListHolder.PageCallback callback) {
+            requests++;
+            pending = callback;
+        }
+        void deliver(List<MediaItem> items) {
+            more = false;
+            MediaListHolder.PageCallback callback = pending;
+            pending = null;
+            if (callback == null) throw new AssertionError("No pending page request");
+            callback.onLoaded(items, false);
+        }
+    }
+
+    private void awaitStableSlideshowPause() throws Exception {
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        long stableSince = SystemClock.uptimeMillis();
+        long position = snapshot().position;
+        int frames = ui(() -> player().getVideoDecoderCounters().renderedOutputBufferCount);
+        while (SystemClock.uptimeMillis() < deadline) {
+            SystemClock.sleep(100);
+            Snapshot current = snapshot();
+            int nowFrames = ui(() -> player().getVideoDecoderCounters().renderedOutputBufferCount);
+            assertFalse("Pause intent must remain false", current.playRequested);
+            if (Math.abs(current.position - position) > 50 || nowFrames != frames) {
+                position = current.position;
+                frames = nowFrames;
+                stableSince = SystemClock.uptimeMillis();
+            } else if (SystemClock.uptimeMillis() - stableSince >= 750) return;
+        }
+        fail("Video did not settle to a paused clock/frame within five seconds");
+    }
+
     private void pauseAt(long position) throws Exception {
         key(KeyEvent.KEYCODE_MEDIA_PAUSE);
         // Arrange a known position; every asserted transition below uses production key dispatch.
@@ -264,7 +421,14 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
 
     private void key(int code) {
         // Go through the window/ViewRoot pipeline so focus navigation is really exercised.
-        getInstrumentation().sendKeyDownUpSync(code);
+        long downTime = SystemClock.uptimeMillis();
+        // On API19 Back may finish on DOWN; app-UID sendKeySync then rejects UP to
+        // the launcher. UiAutomation delivers the complete real system key pair.
+        for (int action : new int[] {KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP}) {
+            KeyEvent event = new KeyEvent(downTime, SystemClock.uptimeMillis(), action, code, 0);
+            event.setSource(android.view.InputDevice.SOURCE_DPAD);
+            assertTrue(getInstrumentation().getUiAutomation().injectInputEvent(event, true));
+        }
         getInstrumentation().waitForIdleSync();
     }
 
@@ -280,14 +444,18 @@ public class VideoRemoteInstrumentationTest extends InstrumentationTestCase {
     }
 
     private void saveScreenshot(String name) throws Exception {
+        SystemClock.sleep(400);
         Bitmap screenshot = getInstrumentation().getUiAutomation().takeScreenshot();
-        if (screenshot == null) return; // Device screenshot support is not the input assertion.
+        assertNotNull("Screenshot required for device evidence", screenshot);
         try {
-            File directory = new File(getInstrumentation().getTargetContext().getExternalFilesDir(null),
-                    "video-remote-evidence");
-            if (!directory.isDirectory() && !directory.mkdirs()) return;
+            Context context = getInstrumentation().getTargetContext();
+            File external = context.getExternalFilesDir(null);
+            File directory = external == null ? null : new File(external, "video-remote-evidence");
+            if (directory == null || !(directory.isDirectory() || directory.mkdirs()))
+                directory = new File(context.getFilesDir(), "video-remote-evidence");
+            assertTrue("Writable screenshot evidence directory required", directory.isDirectory() || directory.mkdirs());
             try (FileOutputStream out = new FileOutputStream(new File(directory, name))) {
-                screenshot.compress(Bitmap.CompressFormat.PNG, 100, out);
+                assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG, 100, out));
             }
         } finally { screenshot.recycle(); }
     }

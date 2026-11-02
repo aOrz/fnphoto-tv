@@ -21,6 +21,8 @@ final class MediaPageController {
     private boolean exhausted;
     private Callback pendingCallback;
     private String boundaryMessage;
+    private List<MediaItem> pendingRestart;
+    private long restartGeneration;
 
     MediaPageController(List<MediaItem> initial, MediaListHolder.PageSource source) {
         if (initial != null) {
@@ -51,6 +53,92 @@ final class MediaPageController {
         if (source != null && source.getBoundaryMessage() != null) return source.getBoundaryMessage();
         return items.size() >= MetadataLimits.MAX_ITEMS && source != null && !source.isWindowed() && source.hasMore()
                 ? MetadataLimits.WINDOW_MESSAGE : null;
+    }
+
+    String getRestartUnavailableMessage() {
+        String boundary = getBoundaryMessage();
+        if (boundary != null) return boundary;
+        if (closed) return "列表已关闭，请返回重新打开";
+        if (source != null && !source.supportsRestart())
+            return "当前来源不是从开头完整加载的列表，无法循环；请返回列表重新开始";
+        return null;
+    }
+
+    /**
+     * Stage instead of immediately replacing: a pause/Back while the request is in flight
+     * must not evict the item still displayed by the activity. Caller checks its navigation
+     * generation and running intent before commitRestart().
+     */
+    void restart(final Callback callback) {
+        if (closed || loading) return;
+        pendingRestart = null;
+        final long generation = ++restartGeneration;
+        String unavailable = getRestartUnavailableMessage();
+        if (unavailable != null) { callback.onPaused(unavailable); return; }
+        if (source == null) {
+            pendingRestart = new ArrayList<>(items);
+            callback.onReady(!pendingRestart.isEmpty());
+            return;
+        }
+        loading = true;
+        pendingCallback = callback;
+        source.restart(new MediaListHolder.PageCallback() {
+            private boolean completed;
+            private Callback take() {
+                if (closed || completed) return null;
+                completed = true;
+                loading = false;
+                Callback target = pendingCallback;
+                pendingCallback = null;
+                return target;
+            }
+            @Override public void onLoaded(List<MediaItem> incoming, boolean more) {
+                Callback target = take();
+                if (target == null || generation != restartGeneration) return;
+                if (incoming == null || incoming.size() > MetadataLimits.MAX_ITEMS) {
+                    target.onFailure(); return;
+                }
+                Set<String> ids = new HashSet<>();
+                for (MediaItem item : incoming) {
+                    if (item == null || item.getId() == null || !ids.add(item.getId())) {
+                        target.onFailure(); return;
+                    }
+                }
+                if (incoming.isEmpty() && more) {
+                    target.onPaused("暂未找到可播放内容，请返回列表继续扫描");
+                    return;
+                }
+                pendingRestart = new ArrayList<>(incoming);
+                target.onReady(!incoming.isEmpty());
+            }
+            @Override public void onFailure() {
+                Callback target = take();
+                if (target != null) target.onFailure();
+            }
+            @Override public void onPaused(String message) {
+                Callback target = take();
+                if (target != null) target.onPaused(message);
+            }
+        });
+    }
+
+    /** End/manual navigation invalidates staged and still-in-flight restart intent. */
+    void discardRestart() {
+        restartGeneration++;
+        pendingRestart = null;
+    }
+
+    boolean commitRestart() {
+        if (closed || pendingRestart == null || pendingRestart.isEmpty()) {
+            pendingRestart = null;
+            return false;
+        }
+        items.clear();
+        items.addAll(pendingRestart);
+        pendingRestart = null;
+        exhausted = false;
+        boundaryMessage = null;
+        return true;
     }
 
     void ensurePrevious(int index, Callback callback) {
@@ -178,6 +266,7 @@ final class MediaPageController {
 
     void close() {
         closed = true;
+        discardRestart();
         loading = false;
         pendingCallback = null;
     }

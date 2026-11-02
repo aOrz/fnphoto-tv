@@ -162,3 +162,20 @@ C04 可选用 README 中的 `video_smoke.py` 辅助截图/暂停/恢复；须人
 `8 MiB` 是单个解压元数据响应的限制，不是全部保留对象的总字节上限。
 真实 NAS 数据在浏览期间变化时，offset 结果可能位移；测试固定 fixture 的无遗漏结果
 不能证明生产服务端具有快照语义或全局去重。软件模拟器内存趋势也不能代替物理 TV 长时测试。
+
+
+## 幻灯片专项（本清单不是已执行结果）
+
+仅合成模拟器：运行 `SlideshowDeviceTest`（`-e synthetic true`），截图输出到应用
+external files 的 `slideshow-device-evidence`；外部存储不可用时（如本次API19）回退至应用私有 `files/slideshow-device-evidence`，可用 `adb -s <serial> shell run-as com.fnphoto.tv cat files/slideshow-device-evidence/<截图>.png` 导出。API19旧版adb的PTY输出需还原CRLF并验证PNG，不把损坏文件当截图。实际结果见本次交付报告。
+
+| ID | 操作 | 预期 | 初始状态 |
+| --- | --- | --- | --- |
+| S01 | 照片 Menu，用DPAD修改间隔/循环/视频，关闭 | 全部可聚焦，偏好保存，不意外启动 | NOT RUN |
+| S02 | 开始、暂停超过一档间隔、继续 | 暂停不切项，继续计完整间隔；不透明照片上状态可见 | NOT RUN |
+| S03 | 从跨560行相册末项循环 | 重新请求offset0，首项正确，不循环最后窗口 | NOT RUN |
+| S04 | 全视频且禁视频、单图、175连续视频 | 无视频流请求/无空转；预算暂停可继续；单图符合循环设置 | NOT RUN |
+| S05 | 暂停中的迟到分页/循环重启返回；Home后返回 | 不自动推进；显式继续交付，退出不复活；跳过视频不自动播放 | NOT RUN |
+| S06 | 混合视频开始、准备/缓冲/播放时暂停继续、结束 | 实际视频帧冻结/恢复，ended只前进一次；定位仍不切媒体 | NOT RUN |
+| S07 | 后续批/超限/缺live源快照循环 | 明确完整性边界，不能冒充完整相册循环 | NOT RUN |
+| S08 | 视频结束等待下一页时连续暂停；页返回后继续 | 暂停不前进；继续进入下一项一次，不重播已结束视频 | NOT RUN |

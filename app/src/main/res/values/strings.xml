@@ -17,4 +17,5 @@
     <string name="video_seek_position">已定位到 %1$s / %2$s</string>
     <string name="video_surface">视频画面；点击打开播放与切换媒体操作栏</string>
     <string name="video_preview_help">确定：播放视频 · 左右：切换媒体</string>
+    <string name="slideshow_settings">幻灯片</string>
 </resources>
