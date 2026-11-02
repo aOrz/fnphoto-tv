@@ -35,6 +35,9 @@
 
 ## 每次任务的交付流程（必须遵守）
 
+配套：[需求模板](docs/requirements/TEMPLATE.md)、[交付与测试报告模板](docs/reports/TEMPLATE.md)、
+[PR 检查清单](.github/pull_request_template.md)；模板不替代下列门槛。
+
 以下流程适用于每次 AI 任务；与上面的实现约束及下方验证要求一起执行。先明确任务属于
 缺陷修复、新需求或纯文档/维护；混合任务分别满足对应门槛，不以改名绕过验证。
 
