@@ -2,6 +2,7 @@ package com.fnphoto.tv;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Application;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +13,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
@@ -515,36 +517,93 @@ public class YearMonthNavigationDeviceTest {
     }
 
     @Test public void monthRestartBackWithDrawerWhileResponseCompletesPreservesReturnedId() throws Exception {
-        fixture.targetOffset = 0;
-        choose(2026, 9);
-        await(() -> media().size() == 35 && !paging().isLoading());
-        openDetail(2);
-        await(() -> "1003".equals(field(detail, "displayedMediaId")));
-        fixture.holdNextAlbum();
-        ui(() -> {
-            ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
-                @Override public void onReady(boolean available) { }
-                @Override public void onFailure() { }
-                @Override public void onPaused(String reason) { }
+        final long traceStarted = SystemClock.uptimeMillis();
+        Application application = (Application) instrumentation.getTargetContext().getApplicationContext();
+        Application.ActivityLifecycleCallbacks trace = new Application.ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(Activity changed, Bundle saved) { record("created", changed); }
+            @Override public void onActivityStarted(Activity changed) { record("started", changed); }
+            @Override public void onActivityResumed(Activity changed) { record("resumed", changed); }
+            @Override public void onActivityPaused(Activity changed) { record("paused", changed); }
+            @Override public void onActivityStopped(Activity changed) { record("stopped", changed); }
+            @Override public void onActivitySaveInstanceState(Activity changed, Bundle saved) { record("save-state", changed); }
+            @Override public void onActivityDestroyed(Activity changed) { record("destroyed", changed); }
+            private void record(String stage, Activity changed) { drawerTraceOnMain(stage, changed, traceStarted); }
+        };
+        application.registerActivityLifecycleCallbacks(trace);
+        try {
+            fixture.targetOffset = 0;
+            choose(2026, 9);
+            await(() -> media().size() == 35 && !paging().isLoading());
+            openDetail(2);
+            await(() -> "1003".equals(field(detail, "displayedMediaId")));
+            fixture.holdNextAlbum();
+            ui(() -> {
+                ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
+                    @Override public void onReady(boolean available) { }
+                    @Override public void onFailure() { }
+                    @Override public void onPaused(String reason) { }
+                });
+                return null;
             });
-            return null;
-        });
-        assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
-        key(KeyEvent.KEYCODE_BACK);
-        await(() -> activity.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "reloadOnStart")));
-        key(KeyEvent.KEYCODE_MENU);
-        await(() -> drawer().isDrawerOpen(GravityCompat.END) && activity.findViewById(R.id.menu_grid).hasFocus());
-        assertTrue("Response is still held while the drawer owns focus", ui(() -> paging().isLoading()));
-        int menuPosition = ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition());
-        fixture.release();
-        await(() -> containsMedia("1003") && !paging().isLoading());
-        assertTrue("Deferred return may not steal drawer focus", ui(() -> activity.findViewById(R.id.menu_grid).hasFocus()));
-        assertEquals(menuPosition, ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition()).intValue());
-        screenshot("restart-return-waits-for-drawer");
-        key(KeyEvent.KEYCODE_BACK);
-        await(() -> !drawer().isDrawerOpen(GravityCompat.END) && "1003".equals(focusedId()));
-        awaitFocusedSyntheticImage();
-        screenshot("restart-return-after-drawer-closes");
+            assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
+            drawerTrace("arrived-before-back", traceStarted);
+            key(KeyEvent.KEYCODE_BACK);
+            drawerTrace("after-back-key", traceStarted);
+            await(() -> activity.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "reloadOnStart")));
+            drawerTrace("before-menu-key", traceStarted);
+            key(KeyEvent.KEYCODE_MENU);
+            drawerTrace("after-menu-key", traceStarted);
+            await(() -> drawer().isDrawerOpen(GravityCompat.END) && activity.findViewById(R.id.menu_grid).hasFocus());
+            assertTrue("Response is still held while the drawer owns focus", ui(() -> {
+                drawerTraceOnMain("assert-drawer-held", activity, traceStarted);
+                return paging().isLoading();
+            }));
+            int menuPosition = ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition());
+            fixture.release();
+            await(() -> containsMedia("1003") && !paging().isLoading());
+            assertTrue("Deferred return may not steal drawer focus", ui(() -> activity.findViewById(R.id.menu_grid).hasFocus()));
+            assertEquals(menuPosition, ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition()).intValue());
+            screenshot("restart-return-waits-for-drawer");
+            key(KeyEvent.KEYCODE_BACK);
+            await(() -> !drawer().isDrawerOpen(GravityCompat.END) && "1003".equals(focusedId()));
+            awaitFocusedSyntheticImage();
+            screenshot("restart-return-after-drawer-closes");
+        } finally {
+            application.unregisterActivityLifecycleCallbacks(trace);
+        }
+    }
+
+    private void drawerTrace(String stage, long started) throws Exception {
+        ui(() -> { drawerTraceOnMain(stage, activity, started); return null; });
+    }
+
+    /** Test-only bounded lifecycle evidence; no URLs, account values, headers or media data. */
+    private void drawerTraceOnMain(String stage, Activity changed, long started) {
+        long now = SystemClock.uptimeMillis();
+        StringBuilder line = new StringBuilder("MONTH_DRAWER_TRACE ")
+                .append(InstrumentationRegistry.getArguments().getString("candidate", "unspecified"))
+                .append(" stage=").append(stage).append(" uptime=").append(now)
+                .append(" elapsed=").append(now - started)
+                .append(" changed=").append(changed.getClass().getSimpleName()).append('@')
+                .append(Integer.toHexString(System.identityHashCode(changed)))
+                .append(" changingConfig=").append(changed.isChangingConfigurations())
+                .append(" main=").append(Integer.toHexString(System.identityHashCode(activity)))
+                .append(" mainFocus=").append(activity.hasWindowFocus())
+                .append(" heldAge=").append(fixture.heldAlbumAt == 0 ? -1 : now - fixture.heldAlbumAt);
+        try {
+            MainFragment current = fragment();
+            MainPagingState state = paging();
+            YearMonthRange month = selectedMonth();
+            line.append(" month=").append(month == null ? "null" : month.label())
+                    .append(" monthPaused=").append(field(current, "monthPaused"))
+                    .append(" monthDetailOpen=").append(field(current, "monthDetailOpen"))
+                    .append(" pagingLoading=").append(state != null && state.isLoading())
+                    .append(" pagingFailed=").append(state != null && state.hasFailed())
+                    .append(" failure=").append(field(current, "photoFailureMessage"));
+        } catch (Exception unavailable) {
+            line.append(" stateUnavailable=").append(unavailable.getClass().getSimpleName());
+        }
+        System.out.println(line);
     }
 
     @Test public void backgroundImmediatelyAfterBackStillCancelsHeldMonthRestart() throws Exception {
@@ -552,6 +611,7 @@ public class YearMonthNavigationDeviceTest {
         choose(2026, 9);
         await(() -> media().size() == 35 && !paging().isLoading());
         openDetail(2);
+        await(() -> "1003".equals(field(detail, "displayedMediaId")));
         fixture.holdNextAlbum();
         ui(() -> {
             ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
@@ -580,10 +640,15 @@ public class YearMonthNavigationDeviceTest {
         await(activity::hasWindowFocus);
         assertTrue("Returning from background still requires explicit continuation",
                 ui(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused"))));
+        assertTrue("Paused return preserves the last detail item as a bounded anchor", ui(() -> containsMedia("1003")));
         assertEquals(beforeStop, fixture.albumRequests.get());
         screenshot("back-then-background-pauses-month");
         continueWithRemote();
-        await(() -> containsMedia("1003") && "1003".equals(focusedId()));
+        // The existing footer action moves to the first newly appended item.
+        // The returned anchor remains present while explicit continuation focuses 1004.
+        await(() -> selectedMonth() != null && selectedMonth().year == 2026 && selectedMonth().month == 9
+                && !Boolean.TRUE.equals(field(fragment(), "monthPaused")) && !paging().isLoading()
+                && containsMedia("1003") && containsMedia("1004") && "1004".equals(focusedId()));
     }
 
     @Test public void favoriteWriteBackKeepsMonthAndSharedDetailNeverWritesCollect() throws Exception {
@@ -1007,6 +1072,7 @@ public class YearMonthNavigationDeviceTest {
         volatile String lastPersonTarget = "";
         volatile String lastSharedTarget = "";
         volatile CountDownLatch gate;
+        volatile long heldAlbumAt;
         volatile CountDownLatch arrived = new CountDownLatch(0);
         final byte[] image;
 
@@ -1034,6 +1100,7 @@ public class YearMonthNavigationDeviceTest {
         }
         String baseUrl() { return "http://127.0.0.1:" + server.getLocalPort(); }
         void holdNextAlbum() {
+            heldAlbumAt = 0;
             gate = new CountDownLatch(1);
             arrived = new CountDownLatch(1);
             holdNext.set(true);
@@ -1093,6 +1160,7 @@ public class YearMonthNavigationDeviceTest {
                     albumRequests.incrementAndGet();
                     if (holdNext.compareAndSet(true, false)) {
                         CountDownLatch held = gate;
+                        heldAlbumAt = SystemClock.uptimeMillis();
                         arrived.countDown();
                         held.await(60, TimeUnit.SECONDS);
                     }
