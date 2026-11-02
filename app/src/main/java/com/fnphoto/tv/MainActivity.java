@@ -403,7 +403,9 @@ public class MainActivity extends FragmentActivity {
         switch (item.getAction()) {
             case "year_month":
             case "year_month_return":
-                closeBrowseMenu();
+                // Finish closing before a fast local response can restore the saved media ID.
+                browseMenuActive = false;
+                drawerLayout.closeDrawer(GravityCompat.END, false);
                 MainFragment monthFragment = (MainFragment) getSupportFragmentManager()
                         .findFragmentById(R.id.main_content_container);
                 if (monthFragment != null) {
