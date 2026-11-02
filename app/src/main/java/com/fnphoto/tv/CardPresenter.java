@@ -22,6 +22,7 @@ import android.widget.TextView;
 
 import androidx.core.content.ContextCompat;
 import androidx.leanback.widget.ImageCardView;
+import androidx.leanback.widget.BaseCardView;
 import androidx.leanback.widget.Presenter;
 
 import com.fnphoto.tv.cache.CachedImageLoader;
@@ -108,12 +109,16 @@ public class CardPresenter extends Presenter {
         final View infoField = cardView.findViewById(androidx.leanback.R.id.info_field);
         if (infoField != null) {
             infoField.setBackgroundResource(R.drawable.bg_card_scrim);
-            // 静止时保持纯图片网格（Immich 风格），聚焦时才浮现日期信息
+            // Albums keep their labels even after focus moves away. Other cards
+            // retain the existing focus-only presentation (including dates/photos).
             infoField.setVisibility(View.INVISIBLE);
             cardView.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 @Override
                 public void onFocusChange(View v, boolean hasFocus) {
-                    infoField.setVisibility(hasFocus ? View.VISIBLE : View.INVISIBLE);
+                    // Leanback may pass its wrapper to a chained focus listener.
+                    boolean album = AlbumDisplay.isAlbum(
+                            (String) cardView.getTag(R.id.media_item_type));
+                    infoField.setVisibility(album || hasFocus ? View.VISIBLE : View.INVISIBLE);
                 }
             });
         }
@@ -145,7 +150,7 @@ public class CardPresenter extends Presenter {
         images.clear();
         CachedImageLoader.clear(cardView.getMainImageView());
 
-        cardView.setTitleText(mediaItem.getTitle());
+        cardView.setTitleText(AlbumDisplay.title(mediaItem.getType(), mediaItem.getTitle()));
         // A pooled card may previously have represented an album/person/folder.
         // Photo, video and date branches do not set a subtitle of their own.
         cardView.setContentText(null);
@@ -153,6 +158,17 @@ public class CardPresenter extends Presenter {
         // 存储当前item的ID和类型，用于检查视图是否已被重用
         cardView.setTag(R.id.media_item_id, mediaItem.getId());
         cardView.setTag(R.id.media_item_type, mediaItem.getType());
+
+        // BaseCardView also writes info visibility during measurement. Configure
+        // that policy, rather than fighting it with only a child visibility flag.
+        // Reset on every bind because the pool is shared with photo/date cards.
+        boolean album = AlbumDisplay.isAlbum(mediaItem.getType());
+        cardView.setInfoVisibility(album ? BaseCardView.CARD_REGION_VISIBLE_ALWAYS
+                : BaseCardView.CARD_REGION_VISIBLE_ACTIVATED);
+        View infoField = cardView.findViewById(androidx.leanback.R.id.info_field);
+        if (infoField != null) {
+            infoField.setVisibility(album || cardView.isFocused() ? View.VISIBLE : View.INVISIBLE);
+        }
 
         if ("geo_retry".equals(mediaItem.getType())) {
             cardView.setMainImageDimensions(cardWidth, cardHeight);

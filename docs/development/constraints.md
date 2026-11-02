@@ -6,6 +6,12 @@
 
 ## TV 焦点与生命周期
 
+- 普通和共享相册目录卡片名称/数量常显：`CardPresenter` 在每次绑定时设置
+  Leanback 信息区为 `CARD_REGION_VISIBLE_ALWAYS`，焦点离开不隐藏名称。
+  照片/日期等其他卡片保留原聚焦信息策略；复用时恢复其 activated 策略，
+  避免手工 visibility 与 Leanback 测量相互覆盖。`AlbumDisplay` 统一空名称兜底。
+  设备回归 `AlbumTitleReproductionTest` 覆盖方向键、抽屉、重布局和滚动回收。
+
 - `FocusImageCardView.dispatchDraw` 在子视图绘制后画焦点环，按 `isFocused()` 判断；
   Leanback selection 可在抽屉打开时留在内容区，不能把 selected 当实际焦点。
   网格 `item_photo_grid.xml` 用可聚焦 FrameLayout 的 foreground 显示焦点，兼容 API 19。
