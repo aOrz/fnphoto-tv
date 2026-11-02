@@ -49,8 +49,7 @@ final class SharedAlbumSupport {
     static MediaItem albumCard(String baseUrl, FnHttpApi.SharedAlbum album) {
         String poster = sameOriginUrl(baseUrl, album.posterUrl);
         if (poster == null) poster = sameOriginUrl(baseUrl, album.posterImgUrl);
-        String title = album.albumName == null || album.albumName.trim().isEmpty()
-                ? "未命名共享相册" : album.albumName;
+        String title = AlbumDisplay.title("shared_album", album.albumName);
         MediaItem item = new MediaItem(String.valueOf(album.albumId), title, "shared_album", poster, null);
         long count = (long) Math.max(0, album.photoCount) + Math.max(0, album.videoCount);
         String owner = album.ownerName == null ? "" : album.ownerName;

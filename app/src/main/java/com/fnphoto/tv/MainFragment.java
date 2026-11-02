@@ -1203,7 +1203,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void appendAlbumCard(FnHttpApi.NewAlbum album, int position) {
         String posterUrl = absoluteUrl(album.posterUrl != null ? album.posterUrl : album.posterImgUrl);
-        MediaItem item = new MediaItem(String.valueOf(album.albumId), album.albumName,
+        MediaItem item = new MediaItem(String.valueOf(album.albumId), AlbumDisplay.title("album", album.albumName),
                 "album", posterUrl, posterUrl);
         item.setDateStr(album.photoCount + "张照片 · " + album.videoCount + "个视频");
         albumPositions.put(item.getId(), position);
