@@ -51,7 +51,7 @@ API19 兼容性与 API29 TV 遥控覆盖分别记录。
 | --- | --- | --- | --- |
 | JVM / APK / lint / test APK | `bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug :app:assembleDebugAndroidTest` | PASS | 33 秒；537 tests，0 failure/error/skip；lint 0 error、99 warning |
 | Python 全量 | `.venv/bin/python -m unittest discover -s test -p 'test_*.py'` | PASS | 93 tests，5.010 秒，0 failure/skip |
-| 年月 instrumentation | `am instrument -w -e synthetic true -e class com.fnphoto.tv.YearMonthNavigationDeviceTest com.fnphoto.tv.test/androidx.test.runner.AndroidJUnitRunner` | NOT RUN | API19/API29 完整 19 场景仍在运行；前置 API19 两轮抽屉 + 四项返回/后台全部 PASS（35.064/31.772/64.785 秒），API29 五项全部 PASS（142.208 + 41.978 秒） |
+| 年月 instrumentation | `am instrument -w -e synthetic true -e class com.fnphoto.tv.YearMonthNavigationDeviceTest com.fnphoto.tv.test/androidx.test.runner.AndroidJUnitRunner` | NOT RUN | API29 完整19项 PASS（598.678 秒）；API19 完整批次结果尚未确认；前置 API19 两轮抽屉 + 四项返回/后台全部 PASS（35.064/31.772/64.785 秒），API29 五项全部 PASS（142.208 + 41.978 秒） |
 | PhotoWall 既有回归 | 同上 class 改为 `com.fnphoto.tv.PhotoWallDeviceTest` | NOT RUN | 当前候选待汇总，共 13 场景 |
 | 幻灯片设备回归 | 同上 class 改为 `com.fnphoto.tv.SlideshowDeviceTest` | NOT RUN | 当前候选待汇总，共 8 场景 |
 | 空态/搜索/文件夹 | 同上 class 改为 `com.fnphoto.tv.EmptyStateDeviceTest` | NOT RUN | 当前候选待汇总，共 13 场景 |
@@ -75,9 +75,8 @@ JVM/HTTP 合同与 UI 结果分开；视频筛选条目不构成本次视频编�
 设备截图和摘要将放在同前缀 `-api19`、`-api29` 目录。已产生并目视确认关键返回/后台的实际截图；先提供这些证据，待完整批次结束补齐实际年份/月对话框、
 五页暂停/继续、空月/未知日期、原位置恢复、详情返回/抽屉保护等截图，逐张标明 API、场景和 APK hash。
 截图必须看见实际对话框或已解码的 SYNTHETIC 图片及焦点，不能拿占位卡片证明图片焦点。
-初版可访问附件：[合成审阅证据包](oai-library://libfile_a8f74942010c81919d3e067034fbc1f3/fnphoto-year-month-f864cc7-evidence.zip)，
-已保存到本次用户的 ChatGPT Library 根目录同名文件；包含 APK、测试 APK、源码 patch、关键截图和摘要。
-初版明确标记完整回归未完成；后续将更新同一附件，不将旧候选图片混作最终验证。
+初版合成审阅附件由当前对话交付，包含 APK、测试 APK、源码 patch、关键截图和摘要；
+私人 Library 文件链接不放入公共仓库或 PR。初版明确标记完整回归未完成，后续补齐同一附件。
 不提交私人媒体、令牌、钥匙或完整日志。
 
 ## 模拟器阻碍与解决记录
@@ -130,7 +129,7 @@ monthDetailOpen 后，Main 的迟到 onStop 在 heldAge 456 ms 到达，484 ms �
 状态测试及第 19 个真实 Activity 未 resume 覆盖测试。f864cc7 关键设备重验在 API19/API29 均 PASS；API19 两轮抽屉均实际覆盖迟到 Main.stop 后仍 loading、未 paused，随后关闭抽屉回到 ID1003。完整回归仍在运行。
 旧 bd25d4f 候选的 API19 加强后的后台测试 PASS 14.764 秒；API29 抽屉两轮 PASS（42.4/43.109 秒），
 这两轮 Main 停止均发生在 Back 前，不能反证 API19 已记录的问题。
-f864cc7 的 API29 完整19项已在 TestRunner 显示19/19 PASS，等待命令收尾和时长；
+f864cc7 的 API29 完整19项已经19/19 PASS、0 skip，598.678 秒；
 API19 已有13项通过，随后设备/ADB响应停滞，最终结果未确认，正在只读诊断；既有设备回归尚未开始。
 
 旧批次明确保留：270d1ae 年月 API19 为 12 PASS / 5 FAIL（381.821 秒），API29 为
