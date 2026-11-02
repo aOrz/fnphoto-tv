@@ -7,6 +7,8 @@
 - [实现约束与 API 边界](constraints.md)：TV 焦点、分页、缓存、鉴权和未实现能力。
 - [开发与验证流程](workflow.md)：真实构建命令、合成服务、模拟器和证据范围。
   其中 [ExoPlayer 来源与兼容边界](workflow.md#exoplayer-来源与兼容边界) 说明官方 Maven 依赖与 API 19 约束。
+- [需求模板](../requirements/TEMPLATE.md)、[交付与测试报告模板](../reports/TEMPLATE.md)、
+  [PR 检查清单](../../.github/pull_request_template.md)：按任务填写，不预填通过结论。
 - [根 AGENTS.md](../../AGENTS.md)：AI 每次修改需要遵守的简明规则。
 
 ## 项目与目录

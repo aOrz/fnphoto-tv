@@ -73,3 +73,60 @@ above from the repository root. No global Gradle installation or CI init script
 is required. The Gradle/AGP versions are intentionally unchanged by this CI work.
 
 The temporary stacked-PR trigger was removed after the performance PR merged.
+
+## Delivery templates and proposed merge gate
+
+The [PR checklist](pull_request_template.md), [requirements template](../docs/requirements/TEMPLATE.md)
+and [delivery report](../docs/reports/TEMPLATE.md) implement the reporting process in
+[AGENTS.md](../AGENTS.md). They do not enforce repository settings or prove that
+checks, independent review, device QA, or real NAS validation occurred.
+
+### Read-only snapshot — 2026-11-02 UTC
+
+At `main` commit `5500226225e889d69a4b9626e72603e65952d84f`:
+
+- `GET /repos/aOrz/fnphoto-tv/branches/main` returned `protected: false`,
+  protection `enabled: false`, required status checks `enforcement_level: off`
+  and empty `contexts`/`checks`.
+- `GET /repos/aOrz/fnphoto-tv/rulesets` returned `[]`.
+- The integration could not read `branches/main/protection`: HTTP 403,
+  `Resource not accessible by integration`. Detailed administrative settings
+  were therefore **not verified**. A separate effective branch-rules endpoint
+  was not supported by the connector. No protection/security settings were changed.
+- The checked-in workflow defines one check, `Debug build and unit tests`, covering
+  JVM tests, debug build, lint and Python contracts. This snapshot does not assert
+  any particular run passed. Inspect the current PR head's check runs, not an old
+  green run. No device/instrumentation or real NAS validation runs in this CI.
+
+These observations are a dated snapshot, not a promise about current settings.
+
+### Proposed settings — owner confirmation required, not applied
+
+For `main`, propose an active protection rule/ruleset with:
+
+1. Require a pull request and **one approval from an eligible independent GitHub
+   reviewer**; dismiss stale approvals on new commits. An agent's review report
+   is useful evidence but does not satisfy GitHub approval enforcement by itself.
+   Confirm an eligible reviewer is available before activation, especially for a
+   single-maintainer repository; otherwise this gate can block all merges.
+2. Require resolution of review conversations.
+3. Require the exact check context **`Debug build and unit tests`**, restricted to
+   the GitHub Actions app after confirming the actual check-run source in a recent
+   successful PR. Require branches to be up to date before merging. Do not use
+   workflow title `Android CI` as the required context or invent separate lint/
+   Python contexts: they are steps inside this one job.
+4. Disallow force pushes and branch deletion. Apply to administrators too; no
+   routine bypass. The owner must explicitly decide any emergency bypass policy
+   before activation. Do not silently grant new access or change security settings.
+
+The existing workflow runs on all PRs targeting `main`, including docs-only and
+Draft PRs; retain that behavior when making its check required. Do not add path
+filters that leave a required check pending. No merge queue is proposed (the
+workflow currently has no `merge_group` trigger).
+
+After owner approval, an authorized maintainer should inspect the live settings
+and existing rules, apply only the confirmed policy, then verify the effective
+rule and a fresh PR check. Test that a failing/missing check and missing approval
+block merging without merging a test PR. Record the actual result and remaining
+access limits. Until then, the checklist remains procedural rather than a
+technical merge gate; a green CI run alone is not permission to merge/deploy.
