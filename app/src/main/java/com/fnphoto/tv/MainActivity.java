@@ -228,6 +228,26 @@ public class MainActivity extends FragmentActivity {
             menuButton.setFocusable(true);
             menuButton.setOnClickListener(v -> openBrowseMenu());
         }
+        findViewById(R.id.btn_year_month).setOnClickListener(v -> {
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.showYearMonthPicker();
+        });
+        findViewById(R.id.btn_year_month_return).setOnClickListener(v -> {
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.returnFromYearMonth();
+        });
+    }
+
+    void setYearMonthReturnVisible(boolean visible) {
+        View button = findViewById(R.id.btn_year_month_return);
+        boolean wasFocused = button.hasFocus();
+        button.setVisibility(visible ? View.VISIBLE : View.GONE);
+        // A removed top-bar action must not strand focus. Do not compete with an open drawer/dialog.
+        if (!visible && wasFocused && canFocusBrowseContent()) {
+            findViewById(R.id.btn_year_month).requestFocus();
+        }
     }
 
     private void setupMainFragment() {

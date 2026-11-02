@@ -23,6 +23,7 @@ final class MediaPageController {
     private String boundaryMessage;
     private List<MediaItem> pendingRestart;
     private long restartGeneration;
+    private long deliveryGeneration;
 
     MediaPageController(List<MediaItem> initial, MediaListHolder.PageSource source) {
         if (initial != null) {
@@ -82,10 +83,11 @@ final class MediaPageController {
         }
         loading = true;
         pendingCallback = callback;
+        final long delivery = ++deliveryGeneration;
         source.restart(new MediaListHolder.PageCallback() {
             private boolean completed;
             private Callback take() {
-                if (closed || completed) return null;
+                if (closed || completed || delivery != deliveryGeneration) return null;
                 completed = true;
                 loading = false;
                 Callback target = pendingCallback;
@@ -154,10 +156,11 @@ final class MediaPageController {
         source.setAnchor(items.get(index));
         loading = true;
         pendingCallback = callback;
+        final long deliveryToken = ++deliveryGeneration;
         MediaListHolder.PageCallback delivery = new MediaListHolder.PageCallback() {
             private boolean completed;
             private Callback take() {
-                if (closed || completed) return null;
+                if (closed || completed || deliveryToken != deliveryGeneration) return null;
                 completed = true;
                 loading = false;
                 Callback target = pendingCallback;
@@ -214,11 +217,12 @@ final class MediaPageController {
         if (source.isWindowed()) { ensureWindow(index, true, callback); return; }
         loading = true;
         pendingCallback = callback;
+        final long delivery = ++deliveryGeneration;
         source.loadMore(new MediaListHolder.PageCallback() {
             private boolean completed;
 
             @Override public void onLoaded(List<MediaItem> incoming, boolean hasMore) {
-                if (closed || completed) return;
+                if (closed || completed || delivery != deliveryGeneration) return;
                 completed = true;
                 loading = false;
                 Set<String> known = new HashSet<>();
@@ -244,7 +248,7 @@ final class MediaPageController {
             }
 
             @Override public void onFailure() {
-                if (closed || completed) return;
+                if (closed || completed || delivery != deliveryGeneration) return;
                 completed = true;
                 loading = false;
                 Callback target = pendingCallback;
@@ -253,7 +257,7 @@ final class MediaPageController {
             }
 
             @Override public void onPaused(String message) {
-                if (closed || completed) return;
+                if (closed || completed || delivery != deliveryGeneration) return;
                 completed = true;
                 loading = false;
                 Callback target = pendingCallback;
@@ -262,6 +266,20 @@ final class MediaPageController {
                 if (target != null) target.onPaused(message);
             }
         });
+    }
+
+    /** Invalidate before cancellation: a source can synchronously deliver from its stop hook. */
+    void onHostStopped() {
+        if (closed) return;
+        discardRestart();
+        if (source != null && source.pausesOnHostStop()) {
+            deliveryGeneration++;
+            loading = false;
+            pendingCallback = null;
+        }
+        // Non-cancelling sources may commit their own cursor while delivering. Preserve the
+        // existing delivery in that case, or an append-only source could lose its final page.
+        if (source != null) source.onHostStopped();
     }
 
     void close() {
