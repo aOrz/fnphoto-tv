@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.TextView;
 
@@ -22,6 +23,7 @@ import androidx.core.view.GravityCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.leanback.widget.ListRowPresenter;
 import androidx.leanback.widget.ListRow;
+import androidx.leanback.widget.ArrayObjectAdapter;
 import androidx.leanback.widget.VerticalGridView;
 import androidx.test.platform.app.InstrumentationRegistry;
 
@@ -68,6 +70,7 @@ public class YearMonthNavigationDeviceTest {
     private Instrumentation instrumentation;
     private MainActivity activity;
     private Activity cover;
+    private Activity detail;
     private Fixture fixture;
     private SharedPreferences prefs;
     private Map<String, ?> savedPrefs;
@@ -90,7 +93,9 @@ public class YearMonthNavigationDeviceTest {
         fixture = new Fixture();
         assertTrue(prefs.edit().clear().putString("nas_url", fixture.baseUrl())
                 .putString("api_token", "synthetic-year-month")
-                .putString("secret", "synthetic-year-month").commit());
+                .putString("secret", "synthetic-year-month")
+                .putString(BrowseSelection.ACCOUNT_KEY, BrowseSelection.accountId(fixture.baseUrl(), "synthetic"))
+                .commit());
         instrumentation.setInTouchMode(false);
         activity = (MainActivity) instrumentation.startActivitySync(new Intent(context, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -103,6 +108,7 @@ public class YearMonthNavigationDeviceTest {
         try {
             if (fixture != null) fixture.release();
             if (cover != null) ui(() -> { cover.finish(); return null; });
+            if (detail != null) ui(() -> { detail.finish(); return null; });
             if (activity != null) ui(() -> { activity.finish(); return null; });
             if (instrumentation != null) instrumentation.waitForIdleSync();
             if (fixture != null) fixture.close();
@@ -127,9 +133,11 @@ public class YearMonthNavigationDeviceTest {
         openPickerWithRemote();
         await(() -> pickerDialog().isShowing() && !pickerChoosingMonth());
         assertEquals("选择月份", ui(() -> ((TextView) pickerDialog().getCurrentFocus()).getText().toString()));
+        awaitPickerRendered(false);
         screenshot("picker-year");
         key(KeyEvent.KEYCODE_DPAD_CENTER);
         await(this::pickerChoosingMonth);
+        awaitPickerRendered(true);
         screenshot("picker-month");
         key(KeyEvent.KEYCODE_BACK);
         await(() -> !pickerChoosingMonth() && pickerDialog().isShowing());
@@ -168,9 +176,11 @@ public class YearMonthNavigationDeviceTest {
                 fixture.albumRequests.get());
         assertEquals(175, ui(() -> media().get(0).getBrowseRawOffset()).intValue());
         await(() -> "1176".equals(focusedId()));
+        awaitFocusedSyntheticImage();
         screenshot("album-sixth-page-month-result");
         activateDrawerAction("year_month_return");
         await(() -> selectedMonth() == null && "1003".equals(focusedId()));
+        awaitFocusedSyntheticImage();
         assertEquals("Restoration reloads the original source coordinate", "0", fixture.lastAlbumOffset);
         assertFalse(ui(() -> activity.findViewById(R.id.btn_year_month_return).isShown()));
         screenshot("album-original-stable-id-restored");
@@ -241,7 +251,7 @@ public class YearMonthNavigationDeviceTest {
 
     @Test public void dateWallMonthQueryReplacesSingleDayAndBackRestoresDaySource() throws Exception {
         ui(() -> { fragment().loadPhotosByDate("2026-10-31", 1); return null; });
-        await(() -> media().size() == 1 && "3001".equals(media().get(0).getId()));
+        await(() -> media().size() == 1 && "3001".equals(media().get(0).getId()) && "3001".equals(focusedId()));
         choose(2026, 9);
         await(() -> media().size() == 1 && "3002".equals(media().get(0).getId()));
         Uri monthRequest = Uri.parse(fixture.lastGalleryTarget);
@@ -249,12 +259,14 @@ public class YearMonthNavigationDeviceTest {
         assertEquals("2026:09:30 23:59:59", monthRequest.getQueryParameter("end_time"));
         assertEquals("0", monthRequest.getQueryParameter("offset"));
         assertEquals("index", monthRequest.getQueryParameter("mode"));
+        awaitFocusedSyntheticImage();
         screenshot("date-wall-cross-month");
         key(KeyEvent.KEYCODE_BACK);
         await(() -> selectedMonth() == null && "3001".equals(focusedId()));
         Uri restored = Uri.parse(fixture.lastGalleryTarget);
         assertEquals("2026:10:31 00:00:00", restored.getQueryParameter("start_time"));
         assertEquals("2026:10:31 23:59:59", restored.getQueryParameter("end_time"));
+        awaitFocusedSyntheticImage();
         screenshot("date-original-day-restored");
     }
 
@@ -322,7 +334,8 @@ public class YearMonthNavigationDeviceTest {
             assertNotNull("Actual media detail opens", cover);
             await(cover::hasWindowFocus);
             key(KeyEvent.KEYCODE_BACK);
-            await(() -> activity.hasWindowFocus() && selectedMonth() != null && selectedMonth().month == 9);
+            await(() -> activity.hasWindowFocus() && selectedMonth() != null && selectedMonth().month == 9
+                    && Boolean.TRUE.equals(field(cover, "reloadOnStart")));
             assertEquals("album", ui(() -> field(fragment(), "photoMode")));
             cover = null;
         } finally { instrumentation.removeMonitor(monitor); }
@@ -361,6 +374,7 @@ public class YearMonthNavigationDeviceTest {
 
         activateDrawerAction("year_month");
         await(() -> pickerDialog().isShowing());
+        awaitPickerRendered(false);
         screenshot("deep-window-menu-month-entry");
         key(KeyEvent.KEYCODE_BACK);
     }
@@ -435,20 +449,242 @@ public class YearMonthNavigationDeviceTest {
         key(KeyEvent.KEYCODE_BACK);
     }
 
+    @Test public void stoppingDetailWhileWaitingForOppositePageDoesNotRestartScan() throws Exception {
+        fixture.targetOffset = 0;
+        choose(2026, 9);
+        await(() -> media().size() == 35 && !paging().isLoading());
+        rebaseAt70();
+        fixture.holdNextAlbum();
+        ui(() -> { requestForward(); return null; });
+        assertTrue("Held forward page reached fixture", fixture.arrived.await(10, TimeUnit.SECONDS));
+        openDetail(0);
+        key(KeyEvent.KEYCODE_DPAD_LEFT);
+        await(() -> field(fragment(), "detailPageCallback") != null
+                && ((MediaPageController) field(detail, "pageController")).isLoading());
+        int beforeStop = fixture.albumRequests.get();
+        cover = instrumentation.startActivitySync(new Intent(instrumentation.getTargetContext(), SettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        await(() -> cover.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "reloadOnStart")));
+        screenshot("opposite-page-wait-stopped-detail");
+        assertTrue("Stopping detail must preserve monthPaused while releasing the opposite-page callback",
+                ui(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused"))));
+        assertFalse("Stopping detail cancels its outstanding month metadata", ui(() -> paging().isLoading()));
+        assertEquals("Cancellation callback must not start an opposite scan in the background",
+                beforeStop, fixture.albumRequests.get());
+    }
+
+    @Test public void backDuringMonthRestartRestoresLastIdAfterHeldResponseCompletes() throws Exception {
+        fixture.targetOffset = 0;
+        choose(2026, 9);
+        await(() -> media().size() == 35 && !paging().isLoading());
+        openDetail(2);
+        await(() -> "1003".equals(field(detail, "displayedMediaId")));
+        fixture.holdNextAlbum();
+        ui(() -> {
+            ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
+                @Override public void onReady(boolean available) { }
+                @Override public void onFailure() { }
+                @Override public void onPaused(String reason) { }
+            });
+            return null;
+        });
+        assertTrue("Month restart has an outstanding first page", fixture.arrived.await(10, TimeUnit.SECONDS));
+        await(() -> media().isEmpty() && paging().isLoading());
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> activity.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "reloadOnStart")));
+        fixture.release();
+        await(() -> selectedMonth() != null && containsMedia("1003") && "1003".equals(focusedId()));
+        screenshot("back-during-month-restart-restores-last-id");
+    }
+
+    @Test public void immediateHomeAfterBackStillCancelsHeldMonthRestart() throws Exception {
+        fixture.targetOffset = 0;
+        choose(2026, 9);
+        await(() -> media().size() == 35 && !paging().isLoading());
+        openDetail(2);
+        fixture.holdNextAlbum();
+        ui(() -> {
+            ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
+                @Override public void onReady(boolean available) { }
+                @Override public void onFailure() { }
+                @Override public void onPaused(String reason) { }
+            });
+            return null;
+        });
+        assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
+        int beforeStop = fixture.albumRequests.get();
+        key(KeyEvent.KEYCODE_BACK);
+        key(KeyEvent.KEYCODE_HOME);
+        await(() -> !activity.hasWindowFocus() && Boolean.TRUE.equals(field(fragment(), "monthPaused")));
+        assertFalse("Back followed by Home must cancel the live request", ui(() -> paging().isLoading()));
+        int responses = fixture.albumResponses.get();
+        fixture.release();
+        await(() -> fixture.albumResponses.get() > responses);
+        assertEquals("No response/cancel callback may resume metadata in the background",
+                beforeStop, fixture.albumRequests.get());
+        ui(() -> {
+            activity.startActivity(new Intent(activity, MainActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+            return null;
+        });
+        await(activity::hasWindowFocus);
+        assertTrue("Returning from Home still requires explicit continuation",
+                ui(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused"))));
+        assertEquals(beforeStop, fixture.albumRequests.get());
+        screenshot("back-then-home-pauses-month");
+        continueWithRemote();
+        await(() -> containsMedia("1003") && "1003".equals(focusedId()));
+    }
+
+    @Test public void favoriteWriteBackKeepsMonthAndSharedDetailNeverWritesCollect() throws Exception {
+        fixture.mixedGallery = true;
+        ui(() -> { activity.retryBrowseMode(BrowseMode.FAVORITES); return null; });
+        await(() -> Boolean.TRUE.equals(field(fragment(), "favoritesTimeline")) && field(fragment(), "photoPaging") == null);
+        ui(() -> { fragment().loadPhotosByDate("2026-10-31", 3); return null; });
+        await(() -> media() != null && media().size() == 2);
+        choose(2026, 9);
+        await(() -> selectedMonth() != null && media().size() == 2 && containsMedia("4001"));
+        openDetail(0);
+        key(KeyEvent.KEYCODE_F1);
+        await(() -> fixture.collectPosts.get() == 1 && !Boolean.TRUE.equals(field(detail, "collectPending")));
+        assertFalse("Synthetic write changed the actual fixture favorite state", fixture.collected4001);
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> activity.hasWindowFocus() && selectedMonth() != null && selectedMonth().month == 9
+                && media().size() == 1 && containsMedia("4002"));
+        assertEquals("favorites", ui(() -> field(fragment(), "photoMode")));
+        assertMonth(Uri.parse(fixture.lastGalleryTarget), "start_time", "end_time");
+        screenshot("favorite-write-back-keeps-month");
+
+        ui(() -> {
+            Method shared = MainFragment.class.getDeclaredMethod("loadPhotosBySharedAlbum", String.class, String.class);
+            shared.setAccessible(true);
+            shared.invoke(fragment(), "9001", "合成共享");
+            return null;
+        });
+        await(() -> media() != null && media().size() == 1 && containsMedia("5001"));
+        choose(2026, 9);
+        await(() -> selectedMonth() != null && media().size() == 1);
+        openDetail(0);
+        assertTrue(ui(() -> detail.getIntent().getBooleanExtra("SHARED_ALBUM_READ_ONLY", false)));
+        int posts = fixture.collectPosts.get();
+        int reads = fixture.detailReads.get();
+        key(KeyEvent.KEYCODE_F1);
+        instrumentation.waitForIdleSync();
+        assertEquals("Shared details must not write favorite state", posts, fixture.collectPosts.get());
+        assertEquals("Shared readonly action must not even fetch mutable favorite state", reads, fixture.detailReads.get());
+        assertFalse(ui(() -> Boolean.TRUE.equals(field(detail, "collectPending"))));
+        screenshot("shared-month-detail-readonly");
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> activity.hasWindowFocus() && selectedMonth() != null && selectedMonth().month == 9);
+    }
+
+    @Test public void monthMenuDoesNotReplaceRememberedBrowseModeAfterActivityRecreation() throws Exception {
+        fixture.mixedGallery = true;
+        ui(() -> { activity.retryBrowseMode(BrowseMode.PHOTOS); return null; });
+        await(() -> media() != null && media().size() == 2 && "media_type".equals(field(fragment(), "photoMode")));
+        String account = prefs.getString(BrowseSelection.ACCOUNT_KEY, "");
+        await(() -> "photo".equals(prefs.getString(BrowseSelection.MODE_PREFIX + account, "")));
+        choose(2026, 9);
+        await(() -> selectedMonth() != null && media().size() == 2);
+        activateDrawerAction("year_month");
+        await(() -> pickerDialog().isShowing());
+        key(KeyEvent.KEYCODE_BACK);
+        await(activity::hasWindowFocus);
+        assertEquals("Month action is not a persisted browse destination", "photo",
+                prefs.getString(BrowseSelection.MODE_PREFIX + account, ""));
+        MainActivity previous = activity;
+        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(MainActivity.class.getName(), null, false);
+        try {
+            ui(() -> { previous.recreate(); return null; });
+            Activity replacement = instrumentation.waitForMonitorWithTimeout(monitor, 15000);
+            assertNotNull("Real Activity recreation must produce a replacement", replacement);
+            assertNotSame(previous, replacement);
+            activity = (MainActivity) replacement;
+            await(() -> activity.hasWindowFocus() && field(fragment(), "rootBrowseMode") == BrowseMode.PHOTOS
+                    && media() != null && media().size() == 2);
+            assertEquals("photo", prefs.getString(BrowseSelection.MODE_PREFIX + account, ""));
+            screenshot("recreated-activity-keeps-browse-mode");
+        } finally { instrumentation.removeMonitor(monitor); }
+    }
+
+    private void rebaseAt70() throws Exception {
+        ui(() -> {
+            Field paused = MainFragment.class.getDeclaredField("monthPaused");
+            paused.setAccessible(true);
+            paused.setBoolean(fragment(), false);
+            MediaItem anchor = new MediaItem("1071", "Synthetic 1071", "photo",
+                    fixture.baseUrl() + "/image/fixture.jpg", fixture.baseUrl() + "/image/fixture.jpg");
+            anchor.setBrowseRawOffset(70);
+            Method relocate = MainFragment.class.getDeclaredMethod("relocatePhotoWindow", MediaItem.class, boolean.class);
+            relocate.setAccessible(true);
+            relocate.invoke(fragment(), anchor, false);
+            requestForward();
+            return null;
+        });
+        await(() -> media().size() == 35 && "1071".equals(media().get(0).getId()) && !paging().isLoading());
+        ui(() -> { selectPhoto(0); return null; });
+        await(() -> "1071".equals(focusedId()));
+    }
+
+    private void requestForward() throws Exception {
+        Method load = MainFragment.class.getDeclaredMethod("loadPhotoPage", boolean.class);
+        load.setAccessible(true);
+        load.invoke(fragment(), true);
+    }
+
+    private void openDetail(int index) throws Exception {
+        ui(() -> { selectPhoto(index); return null; });
+        String id = ui(() -> media().get(index).getId());
+        await(() -> id.equals(focusedId()));
+        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(MediaDetailActivity.class.getName(), null, false);
+        try {
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            detail = instrumentation.waitForMonitorWithTimeout(monitor, 15000);
+            assertNotNull("Real detail activity must open", detail);
+            await(() -> detail.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "canSwitch")));
+        } finally { instrumentation.removeMonitor(monitor); }
+    }
+
     private void assertMonth(Uri target, String start, String end) {
         assertEquals("2026:09:01 00:00:00", target.getQueryParameter(start));
         assertEquals("2026:09:30 23:59:59", target.getQueryParameter(end));
     }
 
-    private boolean activeWindowContains(String text) {
+    private boolean activeWindowContains(String text) throws Exception {
         AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
-        if (root == null) return false;
-        try {
-            List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(text);
-            boolean present = !found.isEmpty();
-            for (AccessibilityNodeInfo node : found) node.recycle();
-            return present;
-        } finally { root.recycle(); }
+        if (root != null) {
+            try {
+                List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByText(text);
+                boolean present = !found.isEmpty();
+                for (AccessibilityNodeInfo node : found) node.recycle();
+                if (present) return true;
+            } finally { root.recycle(); }
+        }
+        // API19 may not expose a freshly opened dialog in UiAutomation's active root.
+        // Inspect the actual displayed window views, never a copied expected string.
+        return ui(() -> {
+            Class<?> managerClass = Class.forName("android.view.WindowManagerGlobal");
+            Object manager = managerClass.getDeclaredMethod("getInstance").invoke(null);
+            Field viewsField = managerClass.getDeclaredField("mViews");
+            viewsField.setAccessible(true);
+            Object views = viewsField.get(manager);
+            if (views instanceof Iterable) {
+                for (Object view : (Iterable<?>) views) if (displayedText((View) view, text)) return true;
+            } else if (views instanceof View[]) {
+                for (View view : (View[]) views) if (displayedText(view, text)) return true;
+            }
+            return false;
+        });
+    }
+
+    private boolean displayedText(View view, String expected) {
+        if (view == null || !view.isShown()) return false;
+        if (view instanceof TextView && ((TextView) view).getText().toString().contains(expected)) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) if (displayedText(group.getChildAt(i), expected)) return true;
+        }
+        return false;
     }
 
     private boolean containsMedia(String id) throws Exception {
@@ -494,8 +730,20 @@ public class YearMonthNavigationDeviceTest {
     }
 
     private void continueWithRemote() throws Exception {
-        ui(() -> { fragment().focusBrowseContent(); return null; });
-        await(() -> stateAction().hasFocus());
+        ui(() -> {
+            if (activity.findViewById(R.id.browse_state_container).isShown()) {
+                fragment().focusBrowseContent();
+            } else {
+                ArrayObjectAdapter rows = (ArrayObjectAdapter) field(fragment(), "mRowsAdapter");
+                int footer = rows.indexOf(field(fragment(), "pageFooter"));
+                assertTrue("Visible continuation footer required", footer >= 0);
+                fragment().getRowsSupportFragment().setSelectedPosition(footer, false,
+                        new ListRowPresenter.SelectItemViewHolderTask(0));
+                fragment().getRowsSupportFragment().getVerticalGridView().requestFocus();
+            }
+            return null;
+        });
+        await(() -> (stateAction() != null && stateAction().hasFocus()) || "__page_action".equals(focusedId()));
         key(KeyEvent.KEYCODE_DPAD_CENTER);
     }
 
@@ -535,6 +783,8 @@ public class YearMonthNavigationDeviceTest {
         return null;
     }
     private void selectPhoto(int index) throws Exception {
+        // A real user gesture cancels queued entry focus before selecting another item.
+        fragment().cancelPhotoFocusHandoff();
         PhotoWallLayout layout = (PhotoWallLayout) field(fragment(), "wallLayout");
         fragment().getRowsSupportFragment().setSelectedPosition(index / layout.columns, false,
                 new ListRowPresenter.SelectItemViewHolderTask(index % layout.columns));
@@ -561,8 +811,24 @@ public class YearMonthNavigationDeviceTest {
             try { if (ui(condition)) return; } catch (Throwable error) { last = error; }
             Thread.sleep(50);
         }
-        screenshot("timeout-state");
-        throw new AssertionError("Timed out: " + ui(() -> title() + "; focus=" + focusedId()), last);
+        try { screenshot("timeout-state"); }
+        catch (Exception | AssertionError screenshotFailure) {
+            System.out.println("Timeout screenshot unavailable: " + screenshotFailure.getClass().getSimpleName());
+        }
+        throw new AssertionError("Timed out: " + ui(() -> title() + "; focus=" + focusedId()
+                + "; activityFocus=" + activity.hasWindowFocus() + "; finishing=" + activity.isFinishing()
+                + "; month=" + (selectedMonth() == null ? "null" : selectedMonth().label())
+                + "; media=" + (media() == null ? -1 : media().size())
+                + "; paused=" + field(fragment(), "monthPaused")
+                + "; initialFocus=" + field(fragment(), "initialPhotoFocusPending")
+                + "; handoffPending=" + field(fragment(), "photoFocusHandoffPending")
+                + "; entryHandoff=" + field(fragment(), "photoEntryFocusHandoff")
+                + "; handoffTarget=" + field(fragment(), "photoFocusHandoffTargetId")
+                + "; handoffGeneration=" + field(fragment(), "photoFocusHandoffGeneration")
+                + "; selectedRow=" + fragment().getSelectedPosition()
+                + "; resumed=" + fragment().isResumed()
+                + "; focusedView=" + (activity.getCurrentFocus() == null ? "null"
+                        : activity.getCurrentFocus().getClass().getSimpleName())), last);
     }
     private void key(int code) {
         long downTime = SystemClock.uptimeMillis();
@@ -570,13 +836,70 @@ public class YearMonthNavigationDeviceTest {
         instrumentation.sendKeySync(new KeyEvent(downTime, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, code, 0));
         instrumentation.waitForIdleSync();
     }
+    private void awaitPickerRendered(boolean monthStage) throws Exception {
+        await(() -> {
+            AlertDialog dialog = pickerDialog();
+            View decor = dialog.getWindow().getDecorView();
+            View focused = dialog.getCurrentFocus();
+            if (!dialog.isShowing() || !decor.isShown() || !decor.hasWindowFocus()
+                    || decor.getWidth() <= 0 || decor.getHeight() <= 0 || !(focused instanceof TextView)) return false;
+            String text = ((TextView) focused).getText().toString();
+            return monthStage ? text.matches("[0-9]{1,2} 月") : "选择月份".equals(text);
+        });
+    }
+
+    /** Real decoded fixture pixels are required before claiming focus over an opaque photo. */
+    private void awaitFocusedSyntheticImage() throws Exception {
+        await(() -> {
+            if (!activity.findViewById(R.id.main_content_container).isShown()
+                    || activity.findViewById(R.id.browse_state_container).isShown()) return false;
+            View focused = activity.getCurrentFocus();
+            while (focused != null && !(focused instanceof androidx.leanback.widget.ImageCardView))
+                focused = focused.getParent() instanceof View ? (View) focused.getParent() : null;
+            if (focused == null) return false;
+            android.graphics.drawable.Drawable drawable = ((androidx.leanback.widget.ImageCardView) focused)
+                    .getMainImageView().getDrawable();
+            if (!(drawable instanceof android.graphics.drawable.BitmapDrawable)) return false;
+            Bitmap source = ((android.graphics.drawable.BitmapDrawable) drawable).getBitmap();
+            Bitmap readable = source;
+            if (Build.VERSION.SDK_INT >= 26 && source.getConfig() == Bitmap.Config.HARDWARE)
+                readable = source.copy(Bitmap.Config.ARGB_8888, false);
+            if (readable == null) return false;
+            try {
+                int color = readable.getPixel(Math.min(10, readable.getWidth() - 1),
+                        Math.min(10, readable.getHeight() - 1));
+                return Color.blue(color) > Color.red(color) + 40 && Color.green(color) > Color.red(color) + 20;
+            } finally { if (readable != source) readable.recycle(); }
+        });
+    }
+
+    private void waitForRenderedFrames() throws Exception {
+        CountDownLatch frames = new CountDownLatch(1);
+        ui(() -> {
+            View decor = activity.getWindow().getDecorView();
+            Object picker = field(fragment(), "monthPicker");
+            if (picker != null && ((YearMonthPicker) picker).isShowing()) decor = pickerDialog().getWindow().getDecorView();
+            else if (cover != null && cover.hasWindowFocus()) decor = cover.getWindow().getDecorView();
+            else if (detail != null && detail.hasWindowFocus()) decor = detail.getWindow().getDecorView();
+            final View window = decor;
+            window.postOnAnimation(() -> window.postOnAnimation(frames::countDown));
+            return null;
+        });
+        assertTrue("Two real display frames must render before capture", frames.await(10, TimeUnit.SECONDS));
+        instrumentation.waitForIdleSync();
+        // A software compositor can present after UI-thread frame callbacks have completed.
+        SystemClock.sleep(400);
+    }
+
     private void screenshot(String scene) throws Exception {
+        waitForRenderedFrames();
         Bitmap bitmap = instrumentation.getUiAutomation().takeScreenshot();
         assertNotNull("Actual emulator screenshot required", bitmap);
         Context context = instrumentation.getTargetContext();
         File directory = context.getExternalFilesDir("year-month-evidence");
-        assertNotNull(directory);
-        assertTrue(directory.isDirectory() || directory.mkdirs());
+        if (directory == null || !(directory.isDirectory() || directory.mkdirs()))
+            directory = new File(context.getFilesDir(), "year-month-evidence");
+        assertTrue("Writable synthetic screenshot directory required", directory.isDirectory() || directory.mkdirs());
         try (FileOutputStream output = new FileOutputStream(new File(directory, scene + ".png"))) {
             assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
         } finally { bitmap.recycle(); }
@@ -601,6 +924,9 @@ public class YearMonthNavigationDeviceTest {
         final ServerSocket server;
         final AtomicInteger albumRequests = new AtomicInteger();
         final AtomicInteger albumResponses = new AtomicInteger();
+        final AtomicInteger collectPosts = new AtomicInteger();
+        final AtomicInteger detailReads = new AtomicInteger();
+        volatile boolean collected4001 = true;
         final List<String> albumTargets = Collections.synchronizedList(new ArrayList<>());
         final AtomicBoolean holdNext = new AtomicBoolean();
         volatile String lastAlbumOffset = "";
@@ -657,12 +983,38 @@ public class YearMonthNavigationDeviceTest {
                 if (first == null) return;
                 String target = first.split(" ")[1];
                 String header;
-                while ((header = input.readLine()) != null && !header.isEmpty()) { }
+                int bodyLength = 0;
+                while ((header = input.readLine()) != null && !header.isEmpty()) {
+                    if (header.toLowerCase(Locale.US).startsWith("content-length:"))
+                        bodyLength = Integer.parseInt(header.substring(header.indexOf(':') + 1).trim());
+                }
+                if (bodyLength > 1024) throw new IllegalArgumentException("Fixture body exceeds bound");
+                char[] requestBody = new char[bodyLength];
+                int read = 0;
+                while (read < bodyLength) {
+                    int next = input.read(requestBody, read, bodyLength - read);
+                    if (next < 0) throw new IllegalArgumentException("Truncated fixture body");
+                    read += next;
+                }
                 Uri uri = Uri.parse(baseUrl() + target);
                 String path = uri.getPath();
                 byte[] body;
                 String type = "application/json";
-                if (path.startsWith("/image")) { body = image; type = "image/jpeg"; }
+                if (path.startsWith("/image") || path.startsWith("/p/api/v1/stream/p/")) {
+                    body = image; type = "image/jpeg";
+                } else if (path.startsWith("/p/api/v1/photo/detail/")) {
+                    detailReads.incrementAndGet();
+                    int id = Integer.parseInt(path.substring(path.lastIndexOf('/') + 1));
+                    int collected = id == 4001 && collected4001 ? 1 : 0;
+                    body = ("{\"code\":0,\"data\":{\"info\":{\"id\":" + id
+                            + ",\"isCollect\":" + collected + "}}}").getBytes("UTF-8");
+                } else if (path.equals("/p/api/v1/photo/collect")) {
+                    Uri form = Uri.parse("http://fixture/?" + new String(requestBody));
+                    if (!"4001".equals(form.getQueryParameter("id"))) throw new IllegalArgumentException("Unknown fixture id");
+                    collected4001 = "1".equals(form.getQueryParameter("collect"));
+                    collectPosts.incrementAndGet();
+                    body = "{\"code\":0}".getBytes("UTF-8");
+                }
                 else if (path.equals("/p/api/v1/gallery/timeline")
                         || path.equals("/p/api/v1/ai-person/photoLibrary/timeLine")
                         || path.equals("/p/api/v1/explore/recent_timeline")) {
@@ -705,7 +1057,7 @@ public class YearMonthNavigationDeviceTest {
                     String date = september ? "2026-09-15 12:00:00" : "2026-10-31 12:00:00";
                     if (mixedGallery) {
                         List<String> items = new ArrayList<>();
-                        items.add(photo(4001, date, "photo", true));
+                        items.add(photo(4001, date, "photo", collected4001));
                         items.add(photo(4002, date, "video", true));
                         items.add(photo(4003, date, "photo", false));
                         body = page(items, false).getBytes("UTF-8");

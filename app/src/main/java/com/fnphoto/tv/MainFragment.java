@@ -2071,7 +2071,9 @@ public class MainFragment extends BrowseSupportFragment {
         pendingReturnedPhoto = null;
         if (!photoPositions.containsKey(item.getId())) {
             relocatePhotoWindow(item, false);
-            loadPhotoPage(true);
+            // A detail that was genuinely backgrounded keeps its explicit-resume boundary.
+            // The returned anchor can be shown without restarting canceled network work.
+            if (!monthPaused) loadPhotoPage(true);
         }
         final String id = item.getId();
         final long generation = requests.generation();
@@ -2974,17 +2976,25 @@ public class MainFragment extends BrowseSupportFragment {
                 private int deliveredLastRaw = currentMediaList.get(currentMediaList.size() - 1).getBrowseRawOffset();
                 private String anchorBoundary;
                 private DetailScanContinuation scanContinuation = new DetailScanContinuation();
+                private boolean returningToWall;
                 @Override public boolean isWindowed() { return true; }
                 @Override public boolean pausesOnHostStop() {
-                    return selectedMonth != null || restoringMonthPoint != null;
+                    return !returningToWall && (selectedMonth != null || restoringMonthPoint != null);
                 }
-                @Override public void onHostStopped() { if (active()) pauseMonthWork(); }
+                @Override public void onHostStopped() {
+                    if (active() && !returningToWall) pauseMonthWork();
+                }
                 @Override public void setAnchor(MediaItem item) {
                     detailAnchorId = item.getId();
                     detailAnchorItem = item;
                 }
                 @Override public void onReturn(MediaItem item) {
-                    if (active()) restoreReturnedPhoto(item);
+                    if (!active()) return;
+                    // Finishing detail returns to the foreground wall, rather than backgrounding
+                    // the month query. Its pending response still owns the deferred ID restore.
+                    returningToWall = true;
+                    monthDetailOpen = false;
+                    restoreReturnedPhoto(item);
                 }
                 @Override public void setAnchorId(String id) {
                     detailAnchorId = id;
@@ -3096,7 +3106,7 @@ public class MainFragment extends BrowseSupportFragment {
                     detailPageCallback = new MediaListHolder.PageCallback() {
                         private boolean waitedForOpposite = oppositeInFlight || (relocate && photoPaging.isLoading());
                         private boolean continueOpposite() {
-                            if (!waitedForOpposite) return false;
+                            if (monthPaused || !waitedForOpposite) return false;
                             waitedForOpposite = false;
                             detailPageCallback = this;
                             preparePhotoDirection(previous);
@@ -3126,6 +3136,9 @@ public class MainFragment extends BrowseSupportFragment {
                         @Override public void onFailure() { callback.onFailure(); }
                         @Override public void onPaused(String message) {
                             if (!active()) { callback.onFailure(); return; }
+                            // Host-stop cancellation is a terminal notification for this gesture.
+                            // Do not turn it into an explicit opposite-direction continuation.
+                            if (monthPaused) { callback.onPaused(message); return; }
                             List<MediaItem> rows = snapshot(previous);
                             if (relocate && continueOpposite()) return;
                             if (hasNeighbor(rows, previous)) deliver(rows, callback);

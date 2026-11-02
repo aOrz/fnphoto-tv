@@ -336,6 +336,7 @@ public class MainActivity extends FragmentActivity {
 
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) monthBackOwned = false;
         if (hasFocus && drawerLayout != null) {
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
@@ -492,11 +493,18 @@ public class MainActivity extends FragmentActivity {
     }
 
     private boolean virtualUpOwned;
+    private boolean monthBackOwned;
 
     // Old AndroidX marks the public Activity/Window.Callback override restricted.
     // Delegate to that framework entry point; no private AndroidX helper is used.
     @android.annotation.SuppressLint("RestrictedApi")
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        // A month Back action starts restoration on DOWN. Its matching UP is not a new
+        // gesture: Activity.dispatchKeyEvent would otherwise cancel the pending focus handoff.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && monthBackOwned) {
+            if (event.getAction() == KeyEvent.ACTION_UP) monthBackOwned = false;
+            return true;
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
@@ -544,7 +552,9 @@ public class MainActivity extends FragmentActivity {
             // 检查 MainFragment 是否需要处理返回键（返回到时间线）
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
+            boolean returningFromMonth = findViewById(R.id.btn_year_month_return).isShown();
             if (fragment != null && fragment.onBackPressed()) {
+                if (returningFromMonth) monthBackOwned = true;
                 return true;  // MainFragment 处理了返回键
             }
             
