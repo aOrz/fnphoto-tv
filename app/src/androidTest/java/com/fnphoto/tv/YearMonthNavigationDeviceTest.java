@@ -514,7 +514,40 @@ public class YearMonthNavigationDeviceTest {
         screenshot("back-during-month-restart-restores-last-id");
     }
 
-    @Test public void immediateHomeAfterBackStillCancelsHeldMonthRestart() throws Exception {
+    @Test public void monthRestartBackWithDrawerWhileResponseCompletesPreservesReturnedId() throws Exception {
+        fixture.targetOffset = 0;
+        choose(2026, 9);
+        await(() -> media().size() == 35 && !paging().isLoading());
+        openDetail(2);
+        await(() -> "1003".equals(field(detail, "displayedMediaId")));
+        fixture.holdNextAlbum();
+        ui(() -> {
+            ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
+                @Override public void onReady(boolean available) { }
+                @Override public void onFailure() { }
+                @Override public void onPaused(String reason) { }
+            });
+            return null;
+        });
+        assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> activity.hasWindowFocus() && Boolean.TRUE.equals(field(detail, "reloadOnStart")));
+        key(KeyEvent.KEYCODE_MENU);
+        await(() -> drawer().isDrawerOpen(GravityCompat.END) && activity.findViewById(R.id.menu_grid).hasFocus());
+        assertTrue("Response is still held while the drawer owns focus", ui(() -> paging().isLoading()));
+        int menuPosition = ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition());
+        fixture.release();
+        await(() -> containsMedia("1003") && !paging().isLoading());
+        assertTrue("Deferred return may not steal drawer focus", ui(() -> activity.findViewById(R.id.menu_grid).hasFocus()));
+        assertEquals(menuPosition, ui(() -> ((VerticalGridView) activity.findViewById(R.id.menu_grid)).getSelectedPosition()).intValue());
+        screenshot("restart-return-waits-for-drawer");
+        key(KeyEvent.KEYCODE_BACK);
+        await(() -> !drawer().isDrawerOpen(GravityCompat.END) && "1003".equals(focusedId()));
+        awaitFocusedSyntheticImage();
+        screenshot("restart-return-after-drawer-closes");
+    }
+
+    @Test public void backgroundImmediatelyAfterBackStillCancelsHeldMonthRestart() throws Exception {
         fixture.targetOffset = 0;
         choose(2026, 9);
         await(() -> media().size() == 35 && !paging().isLoading());
@@ -531,24 +564,24 @@ public class YearMonthNavigationDeviceTest {
         assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
         int beforeStop = fixture.albumRequests.get();
         key(KeyEvent.KEYCODE_BACK);
-        key(KeyEvent.KEYCODE_HOME);
-        await(() -> !activity.hasWindowFocus() && Boolean.TRUE.equals(field(fragment(), "monthPaused")));
-        assertFalse("Back followed by Home must cancel the live request", ui(() -> paging().isLoading()));
+        // An actual covering Activity proves onStop; a HOME key injected during
+        // a window transition may be ignored by the emulator's system policy.
+        cover = instrumentation.startActivitySync(new Intent(instrumentation.getTargetContext(), SettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        await(() -> cover.hasWindowFocus() && !activity.hasWindowFocus()
+                && Boolean.TRUE.equals(field(fragment(), "monthPaused")));
+        assertFalse("Back followed by backgrounding must cancel the live request", ui(() -> paging().isLoading()));
         int responses = fixture.albumResponses.get();
         fixture.release();
         await(() -> fixture.albumResponses.get() > responses);
         assertEquals("No response/cancel callback may resume metadata in the background",
                 beforeStop, fixture.albumRequests.get());
-        ui(() -> {
-            activity.startActivity(new Intent(activity, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-            return null;
-        });
+        ui(() -> { cover.finish(); return null; });
         await(activity::hasWindowFocus);
-        assertTrue("Returning from Home still requires explicit continuation",
+        assertTrue("Returning from background still requires explicit continuation",
                 ui(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused"))));
         assertEquals(beforeStop, fixture.albumRequests.get());
-        screenshot("back-then-home-pauses-month");
+        screenshot("back-then-background-pauses-month");
         continueWithRemote();
         await(() -> containsMedia("1003") && "1003".equals(focusedId()));
     }

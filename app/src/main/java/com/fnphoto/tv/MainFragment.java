@@ -256,6 +256,9 @@ public class MainFragment extends BrowseSupportFragment {
             if (!requests.isCurrent(generation) || !(getActivity() instanceof MainActivity)) return;
             MainActivity activity = (MainActivity) getActivity();
             if (!activity.canFocusBrowseContent()) return;
+            // Drawer closure does not resume the Activity or change window focus. Consume
+            // a deferred detail return now that the content is allowed to receive it.
+            applyPendingPhotoReturn();
             if (activity.focusBrowseState()) return;
             boolean hasCards = false;
             for (int i = 0; i < mRowsAdapter.size(); i++) {
@@ -500,7 +503,11 @@ public class MainFragment extends BrowseSupportFragment {
         monthReturnPoint = point;
         selectedMonth = range;
         updateMonthReturnButton();
-        startPhotoPaging(photoMode, point.title + " · " + range.label());
+        String sourceTitle = point.title;
+        if ("date".equals(photoMode)) sourceTitle = "图库";
+        else if ("favorites".equals(photoMode)) sourceTitle = "收藏";
+        else if ("person".equals(photoMode)) sourceTitle = currentPersonName == null ? "人物" : currentPersonName;
+        startPhotoPaging(photoMode, sourceTitle + " · " + range.label());
     }
 
     void returnFromYearMonth() {
