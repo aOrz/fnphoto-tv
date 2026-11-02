@@ -26,6 +26,8 @@ import androidx.leanback.widget.ListRow;
 import androidx.leanback.widget.ArrayObjectAdapter;
 import androidx.leanback.widget.VerticalGridView;
 import androidx.test.platform.app.InstrumentationRegistry;
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry;
+import androidx.test.runner.lifecycle.Stage;
 
 import org.junit.After;
 import org.junit.Before;
@@ -110,6 +112,19 @@ public class YearMonthNavigationDeviceTest {
             if (cover != null) ui(() -> { cover.finish(); return null; });
             if (detail != null) ui(() -> { detail.finish(); return null; });
             if (activity != null) ui(() -> { activity.finish(); return null; });
+            if (instrumentation != null) ui(() -> {
+                // A failed recreation assertion must not leave the replacement Activity
+                // running against a closed fixture and leak it into the next scenario.
+                for (Stage stage : Stage.values()) {
+                    if (stage == Stage.DESTROYED) continue;
+                    for (Activity candidate : new ArrayList<>(ActivityLifecycleMonitorRegistry
+                            .getInstance().getActivitiesInStage(stage))) {
+                        if (candidate instanceof MainActivity || candidate instanceof MediaDetailActivity
+                                || candidate instanceof SettingsActivity) candidate.finish();
+                    }
+                }
+                return null;
+            });
             if (instrumentation != null) instrumentation.waitForIdleSync();
             if (fixture != null) fixture.close();
             if (prefs != null && savedPrefs != null) {
@@ -454,10 +469,12 @@ public class YearMonthNavigationDeviceTest {
         choose(2026, 9);
         await(() -> media().size() == 35 && !paging().isLoading());
         rebaseAt70();
+        // Start detail before holding the request: slow emulator startup must not
+        // consume the production HTTP read timeout before LEFT joins the request.
+        openDetail(0);
         fixture.holdNextAlbum();
         ui(() -> { requestForward(); return null; });
         assertTrue("Held forward page reached fixture", fixture.arrived.await(10, TimeUnit.SECONDS));
-        openDetail(0);
         key(KeyEvent.KEYCODE_DPAD_LEFT);
         await(() -> field(fragment(), "detailPageCallback") != null
                 && ((MediaPageController) field(detail, "pageController")).isLoading());
@@ -593,18 +610,24 @@ public class YearMonthNavigationDeviceTest {
         assertEquals("Month action is not a persisted browse destination", "photo",
                 prefs.getString(BrowseSelection.MODE_PREFIX + account, ""));
         MainActivity previous = activity;
-        Instrumentation.ActivityMonitor monitor = instrumentation.addMonitor(MainActivity.class.getName(), null, false);
-        try {
-            ui(() -> { previous.recreate(); return null; });
-            Activity replacement = instrumentation.waitForMonitorWithTimeout(monitor, 15000);
-            assertNotNull("Real Activity recreation must produce a replacement", replacement);
-            assertNotSame(previous, replacement);
-            activity = (MainActivity) replacement;
-            await(() -> activity.hasWindowFocus() && field(fragment(), "rootBrowseMode") == BrowseMode.PHOTOS
-                    && media() != null && media().size() == 2);
-            assertEquals("photo", prefs.getString(BrowseSelection.MODE_PREFIX + account, ""));
-            screenshot("recreated-activity-keeps-browse-mode");
-        } finally { instrumentation.removeMonitor(monitor); }
+        ui(() -> { previous.recreate(); return null; });
+        await(() -> {
+            // ActivityMonitor can observe the old Activity's onPause before the
+            // replacement is created on API19; wait for the actual new instance.
+            for (Activity candidate : ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(Stage.RESUMED)) {
+                if (candidate instanceof MainActivity && candidate != previous) {
+                    activity = (MainActivity) candidate;
+                    return true;
+                }
+            }
+            return false;
+        });
+        assertNotSame(previous, activity);
+        await(() -> activity.hasWindowFocus() && field(fragment(), "rootBrowseMode") == BrowseMode.PHOTOS
+                && media() != null && media().size() == 2);
+        assertEquals("photo", prefs.getString(BrowseSelection.MODE_PREFIX + account, ""));
+        screenshot("recreated-activity-keeps-browse-mode");
     }
 
     private void rebaseAt70() throws Exception {
@@ -815,7 +838,12 @@ public class YearMonthNavigationDeviceTest {
         catch (Exception | AssertionError screenshotFailure) {
             System.out.println("Timeout screenshot unavailable: " + screenshotFailure.getClass().getSimpleName());
         }
-        throw new AssertionError("Timed out: " + ui(() -> title() + "; focus=" + focusedId()
+        String diagnostic;
+        try {
+            diagnostic = ui(() -> activity == null ? "activity=null"
+                    : fragment() == null ? "fragment=null; activityFocus=" + activity.hasWindowFocus()
+                            + "; finishing=" + activity.isFinishing() + "; destroyed=" + activity.isDestroyed()
+                    : title() + "; focus=" + focusedId()
                 + "; activityFocus=" + activity.hasWindowFocus() + "; finishing=" + activity.isFinishing()
                 + "; month=" + (selectedMonth() == null ? "null" : selectedMonth().label())
                 + "; media=" + (media() == null ? -1 : media().size())
@@ -828,7 +856,11 @@ public class YearMonthNavigationDeviceTest {
                 + "; selectedRow=" + fragment().getSelectedPosition()
                 + "; resumed=" + fragment().isResumed()
                 + "; focusedView=" + (activity.getCurrentFocus() == null ? "null"
-                        : activity.getCurrentFocus().getClass().getSimpleName())), last);
+                        : activity.getCurrentFocus().getClass().getSimpleName()));
+        } catch (Throwable diagnosticFailure) {
+            diagnostic = "diagnostic unavailable: " + diagnosticFailure.getClass().getSimpleName();
+        }
+        throw new AssertionError("Timed out: " + diagnostic, last);
     }
     private void key(int code) {
         long downTime = SystemClock.uptimeMillis();

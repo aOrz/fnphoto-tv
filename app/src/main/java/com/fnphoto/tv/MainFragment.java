@@ -274,6 +274,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onResume() {
         super.onResume();
+        applyPendingPhotoReturn();
         schedulePhotoDemandCheck();
         if (getActivity() == null) return;
         long revision = getActivity().getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE)
@@ -828,7 +829,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     /** A new photo window starts at its first item, not a column remembered from its parent. */
     private void focusFirstPhotoAfterLoad() {
-        if (!initialPhotoFocusPending) return;
+        if (!initialPhotoFocusPending || pendingReturnedPhoto != null) return;
         initialPhotoFocusPending = false;
         // Finish the loading/empty-state transition first. Leanback may preserve the loading
         // footer or parent's row/column; neither is an explicit photo selection.
@@ -2065,8 +2066,14 @@ public class MainFragment extends BrowseSupportFragment {
         applyPendingPhotoReturn();
     }
 
-    private void applyPendingPhotoReturn() {
+    void applyPendingPhotoReturn() {
         if (pendingReturnedPhoto == null || photoPaging == null || photoPaging.isLoading()) return;
+        // A deferred month detail return owns one explicit focus intention. Wait until the
+        // wall can receive it instead of losing it while the detail window is still closing.
+        if (selectedMonth != null && (!isResumed() || !(getActivity() instanceof MainActivity)
+                || !((MainActivity) getActivity()).canFocusBrowseContent())) return;
+        boolean restoreMonthFocus = selectedMonth != null && initialPhotoFocusPending;
+        if (restoreMonthFocus) initialPhotoFocusPending = false;
         MediaItem item = pendingReturnedPhoto;
         pendingReturnedPhoto = null;
         if (!photoPositions.containsKey(item.getId())) {
@@ -2077,11 +2084,18 @@ public class MainFragment extends BrowseSupportFragment {
         }
         final String id = item.getId();
         final long generation = requests.generation();
-        positionHandler.post(() -> {
-            if (!requests.isCurrent(generation)) return;
-            Integer position = photoPositions.get(id);
-            if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
-        });
+        if (restoreMonthFocus) {
+            photoFocusHandoffPending = true;
+            photoEntryFocusHandoff = true;
+            photoFocusHandoffTargetId = id;
+            restorePhotoFocusAfterLayout(id, generation, ++photoFocusHandoffGeneration);
+        } else {
+            positionHandler.post(() -> {
+                if (!requests.isCurrent(generation)) return;
+                Integer position = photoPositions.get(id);
+                if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
+            });
+        }
     }
 
     private void preparePhotoDirection(boolean previous) {
@@ -2994,6 +3008,7 @@ public class MainFragment extends BrowseSupportFragment {
                     // the month query. Its pending response still owns the deferred ID restore.
                     returningToWall = true;
                     monthDetailOpen = false;
+                    if (selectedMonth != null) initialPhotoFocusPending = true;
                     restoreReturnedPhoto(item);
                 }
                 @Override public void setAnchorId(String id) {

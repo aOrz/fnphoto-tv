@@ -341,6 +341,7 @@ public class MainActivity extends FragmentActivity {
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
             if (fragment != null) {
+                fragment.applyPendingPhotoReturn();
                 if (getCurrentFocus() == null) fragment.focusBrowseContent();
                 fragment.schedulePhotoDemandCheck();
             }
@@ -494,6 +495,7 @@ public class MainActivity extends FragmentActivity {
 
     private boolean virtualUpOwned;
     private boolean monthBackOwned;
+    private boolean dispatchingKeyRelease;
 
     // Old AndroidX marks the public Activity/Window.Callback override restricted.
     // Delegate to that framework entry point; no private AndroidX helper is used.
@@ -525,12 +527,19 @@ public class MainActivity extends FragmentActivity {
                 }
             }
         }
-        return super.dispatchKeyEvent(event);
+        // Activity calls onUserInteraction for both halves of a key gesture. Only the
+        // initial press is a new focus intention; its release must not undo navigation.
+        dispatchingKeyRelease = event.getAction() == KeyEvent.ACTION_UP;
+        try {
+            return super.dispatchKeyEvent(event);
+        } finally {
+            dispatchingKeyRelease = false;
+        }
     }
 
     @Override public void onUserInteraction() {
         super.onUserInteraction();
-        cancelPendingPhotoFocusHandoff();
+        if (!dispatchingKeyRelease) cancelPendingPhotoFocusHandoff();
     }
 
     @Override

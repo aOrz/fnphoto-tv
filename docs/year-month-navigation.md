@@ -59,8 +59,11 @@
 保留错误/不完整状态。每响应 8 MiB 限制不变，也不表示进程总内存上限。
 
 切换月份、切换来源或退出先使旧请求代数失效再取消，旧结果不能覆盖新查询。
-后台停止年月扫描并显示暂停，回前台需显式继续；打开详情保留月份来源，详情停止时
-通过 `PageSource` 的停止钩子取消该来源的工作。详情中的旧交付不能取走新请求的回调。
+后台停止年月扫描并显示暂停，回前台需显式继续；打开详情保留月份来源，详情进入后台时
+通过 `PageSource` 的停止钩子取消该来源的工作。正常 Back 返回仍在前台的照片墙不算后台，
+保留在途请求完成后的媒体 ID 恢复；Back 后随即进入后台仍取消。暂停通知不能触发反向续页，
+详情中的旧交付不能取走新请求的回调。月份 Back 的按下/抬起作为一次动作处理，
+抬起不取消该次返回已经启动的焦点恢复。
 选择器与抽屉打开期间不能由异步加载抢焦点。具体焦点与生命周期验收需对应 APK 的设备证据。
 
 ## 返回原位置的边界
@@ -81,6 +84,8 @@
 - `YearMonthPicker`、`YearMonthRange`：DPAD 年月选择及日期边界/严格匹配。
 - `MonthReturnPoint`：单个来源坐标；`SlidingPhotoWindow`、`MainPagingState` 保持现有分页预算。
 - `YearMonthRangeTest`、`MonthReturnPointTest`、`MediaPageStopTest`：日期、恢复坐标和交付隔离的 JVM 测试。
+- `YearMonthNavigationDeviceTest`：真实 Activity/DPAD 和合成 HTTP 的设备场景；部分前置坐标由反射设置，
+  不等同于全链纯遥控或真实 NAS 联调。外部手工 fixture 见 [合成 QA](../test/YEAR_MONTH_QA.md)。
 
 构建、lint、Python 合同、设备截图及真实 NAS 验证分开记录，命令和证据要求见
 [开发流程](development/workflow.md)。Java 8/API19 与固定依赖约束保持不变；
