@@ -441,7 +441,8 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private boolean supportsYearMonth() {
-        return photoPaging != null && ("date".equals(photoMode) || "favorites".equals(photoMode)
+        return photoPaging != null && rootBrowseMode != BrowseMode.RECENT
+                && ("date".equals(photoMode) || "favorites".equals(photoMode)
                 || "media_type".equals(photoMode) || "album".equals(photoMode)
                 || "shared_album".equals(photoMode) || "person".equals(photoMode));
     }
@@ -450,7 +451,7 @@ public class MainFragment extends BrowseSupportFragment {
         if (getActivity() == null || (monthPicker != null && monthPicker.isShowing())) return;
         if (!supportsYearMonth()) {
             new android.app.AlertDialog.Builder(getActivity()).setTitle("当前来源不支持年月跳转")
-                    .setMessage("请先进入图库日期、人物日期、普通或共享相册的照片墙，或照片/视频筛选。地点缺少日期分页合同；文件夹与搜索暂不支持。")
+                    .setMessage("请先进入图库日期、人物日期、普通或共享相册的照片墙，或照片/视频筛选。地点与最近添加缺少可靠的年月查询合同；文件夹与搜索暂不支持。")
                     .setPositiveButton("知道了", null).show();
             return;
         }
@@ -466,8 +467,11 @@ public class MainFragment extends BrowseSupportFragment {
 
     private MonthReturnPoint captureMonthReturnPoint() {
         MediaItem anchor = selectedWallItem;
-        if (anchor == null || !photoPositions.containsKey(anchor.getId()))
-            anchor = currentMediaList.isEmpty() ? null : currentMediaList.get(0);
+        if (anchor == null || !photoPositions.containsKey(anchor.getId())) {
+            boolean atFooter = anchor != null && "page_action".equals(anchor.getType());
+            anchor = currentMediaList.isEmpty() ? null
+                    : currentMediaList.get(atFooter ? currentMediaList.size() - 1 : 0);
+        }
         return new MonthReturnPoint(photoMode, photoDate, photoRangeStart, photoRangeEnd,
                 photoCategory, pagedTitle, photoAlbumId, photoPersonId,
                 anchor == null ? null : anchor.getId(), anchor == null ? 0 : anchor.getBrowseRawOffset());

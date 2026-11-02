@@ -179,6 +179,9 @@ public class MainActivity extends FragmentActivity {
         menuAdapter.add(new MenuItem("收藏", "favorites"));
         menuAdapter.add(new MenuItem("最近添加", "recent"));
         menuAdapter.add(new MenuItem("搜索", "search"));
+        // Always reachable with MENU, even when UP at a virtualized wall edge loads older rows.
+        menuAdapter.add(new MenuItem("跳转年月", "year_month"));
+        menuAdapter.add(new MenuItem("返回原位置", "year_month_return"));
         
         // 第二组：相册分类
         menuAdapter.add(new MenuItem("相册", "albums"));
@@ -398,6 +401,17 @@ public class MainActivity extends FragmentActivity {
             return;
         }
         switch (item.getAction()) {
+            case "year_month":
+            case "year_month_return":
+                closeBrowseMenu();
+                MainFragment monthFragment = (MainFragment) getSupportFragmentManager()
+                        .findFragmentById(R.id.main_content_container);
+                if (monthFragment != null) {
+                    if ("year_month".equals(item.getAction())) monthFragment.showYearMonthPicker();
+                    else if (findViewById(R.id.btn_year_month_return).isShown()) monthFragment.returnFromYearMonth();
+                    else Toast.makeText(this, "尚未跳转年月，没有待恢复的原位置", Toast.LENGTH_SHORT).show();
+                }
+                return;
             case "search":
                 openSearch();
                 return;
