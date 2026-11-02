@@ -63,6 +63,17 @@ public class MainFragment extends BrowseSupportFragment {
     private int previewRequests;
     private int previewScreen; // 0: inactive, 1: timeline, 2: person timeline
     private MainPagingState photoPaging;
+    private final MainRequestScope photoRequests = new MainRequestScope();
+    private YearMonthRange selectedMonth;
+    private MonthReturnPoint monthReturnPoint;
+    private MonthReturnPoint restoringMonthPoint;
+    private int restorePagesRemaining;
+    private boolean monthHasUnknownDates;
+    private boolean monthEverMatched;
+    private boolean monthPaused;
+    private final MonthDetailHandoff monthDetailHandoff = new MonthDetailHandoff();
+    private YearMonthPicker monthPicker;
+    private String monthNotice;
     private SlidingPhotoWindow photoWindow;
     private boolean loadingPreviousPhotos;
     private boolean backwardPhotoNavigation;
@@ -245,6 +256,9 @@ public class MainFragment extends BrowseSupportFragment {
             if (!requests.isCurrent(generation) || !(getActivity() instanceof MainActivity)) return;
             MainActivity activity = (MainActivity) getActivity();
             if (!activity.canFocusBrowseContent()) return;
+            // Drawer closure does not resume the Activity or change window focus. Consume
+            // a deferred detail return now that the content is allowed to receive it.
+            applyPendingPhotoReturn();
             if (activity.focusBrowseState()) return;
             boolean hasCards = false;
             for (int i = 0; i < mRowsAdapter.size(); i++) {
@@ -263,15 +277,22 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onResume() {
         super.onResume();
+        monthDetailHandoff.wallResumed();
+        applyPendingPhotoReturn();
         schedulePhotoDemandCheck();
         if (getActivity() == null) return;
         long revision = getActivity().getSharedPreferences("fn_photo_prefs", Context.MODE_PRIVATE)
                 .getLong("collect_revision", 0L);
+        if (monthPaused && photoPaging != null) updatePageFooter(photoPaging, currentMediaList.size());
         if (revision == collectionRevision) return;
         collectionRevision = revision;
         java.util.Iterator<String> keys = previewThumbnailCache.keySet().iterator();
         while (keys.hasNext()) if (keys.next().startsWith("favorites:")) keys.remove();
         if (favoritesTimeline) {
+            if (selectedMonth != null) {
+                selectYearMonth(selectedMonth.year, selectedMonth.month);
+                return;
+            }
             if (isPhotoListView && "favorites".equals(photoMode) && photoDate != null) {
                 loadPhotosByDate(photoDate, 0);
             } else {
@@ -300,6 +321,17 @@ public class MainFragment extends BrowseSupportFragment {
         reflowingWall = false;
         selectedWallItem = null;
         requests.next();
+        photoRequests.next();
+        selectedMonth = null;
+        monthReturnPoint = null;
+        restoringMonthPoint = null;
+        monthHasUnknownDates = false;
+        monthEverMatched = false;
+        monthPaused = false;
+        monthNotice = null;
+        monthDetailHandoff.reset();
+        if (monthPicker != null) { monthPicker.dismiss(); monthPicker = null; }
+        updateMonthReturnButton();
         lazyLoadHandler.removeCallbacksAndMessages(null);
         previewLoadThrottle.reset();
         positionHandler.removeCallbacksAndMessages(null);
@@ -397,6 +429,146 @@ public class MainFragment extends BrowseSupportFragment {
                 }
             }
         });
+    }
+
+    /** Photo cancellation has its own generation so a paused detail source remains usable. */
+    private <T> void enqueuePhoto(Call<T> call, final Callback<T> callback) {
+        final long generation = photoRequests.generation();
+        photoRequests.track(call, call::cancel);
+        enqueue(call, new Callback<T>() {
+            @Override public void onResponse(Call<T> completed, Response<T> response) {
+                if (photoRequests.complete(completed, generation)) callback.onResponse(completed, response);
+            }
+            @Override public void onFailure(Call<T> completed, Throwable error) {
+                if (photoRequests.complete(completed, generation)) callback.onFailure(completed, error);
+            }
+        });
+    }
+
+    private boolean supportsYearMonth() {
+        return photoPaging != null && rootBrowseMode != BrowseMode.RECENT
+                && ("date".equals(photoMode) || "favorites".equals(photoMode)
+                || "media_type".equals(photoMode) || "album".equals(photoMode)
+                || "shared_album".equals(photoMode) || "person".equals(photoMode));
+    }
+
+    void showYearMonthPicker() {
+        if (getActivity() == null || (monthPicker != null && monthPicker.isShowing())) return;
+        if (!supportsYearMonth()) {
+            new android.app.AlertDialog.Builder(getActivity()).setTitle("当前来源不支持年月跳转")
+                    .setMessage("请先进入图库日期、人物日期、普通或共享相册的照片墙，或照片/视频筛选。地点与最近添加缺少可靠的年月查询合同；文件夹与搜索暂不支持。")
+                    .setPositiveButton("知道了", null).show();
+            return;
+        }
+        cancelPhotoFocusHandoff();
+        java.util.Calendar now = java.util.Calendar.getInstance();
+        final long generation = requests.generation();
+        monthPicker = YearMonthPicker.show(getActivity(), selectedMonth == null ? now.get(java.util.Calendar.YEAR) : selectedMonth.year,
+                selectedMonth == null ? now.get(java.util.Calendar.MONTH) + 1 : selectedMonth.month,
+                "shared_album".equals(photoMode), (year, month) -> {
+                    if (requests.isCurrent(generation)) selectYearMonth(year, month);
+                });
+    }
+
+    private MonthReturnPoint captureMonthReturnPoint() {
+        MediaItem anchor = selectedWallItem;
+        if (anchor == null || !photoPositions.containsKey(anchor.getId())) {
+            boolean atFooter = anchor != null && "page_action".equals(anchor.getType());
+            anchor = currentMediaList.isEmpty() ? null
+                    : currentMediaList.get(atFooter ? currentMediaList.size() - 1 : 0);
+        }
+        return new MonthReturnPoint(photoMode, photoDate, photoRangeStart, photoRangeEnd,
+                photoCategory, pagedTitle, photoAlbumId, photoPersonId,
+                anchor == null ? null : anchor.getId(), anchor == null ? 0 : anchor.getBrowseRawOffset());
+    }
+
+    private void applyMonthSource(MonthReturnPoint point) {
+        photoMode = point.mode;
+        photoDate = point.date;
+        photoRangeStart = point.rangeStart;
+        photoRangeEnd = point.rangeEnd;
+        photoCategory = point.category;
+        photoAlbumId = point.albumId;
+        photoPersonId = point.personId;
+        pagedTitle = point.title;
+    }
+
+    void selectYearMonth(int year, int month) {
+        if (!supportsYearMonth()) return;
+        YearMonthRange range = new YearMonthRange(year, month);
+        if ("shared_album".equals(photoMode) && !range.isWithinSharedRange()) return;
+        MonthReturnPoint point = monthReturnPoint != null ? monthReturnPoint
+                : restoringMonthPoint != null ? restoringMonthPoint : captureMonthReturnPoint();
+        beginScreen();
+        applyMonthSource(point);
+        monthReturnPoint = point;
+        selectedMonth = range;
+        updateMonthReturnButton();
+        String sourceTitle = point.title;
+        if ("date".equals(photoMode)) sourceTitle = "图库";
+        else if ("favorites".equals(photoMode)) sourceTitle = "收藏";
+        else if ("person".equals(photoMode)) sourceTitle = currentPersonName == null ? "人物" : currentPersonName;
+        startPhotoPaging(photoMode, sourceTitle + " · " + range.label());
+    }
+
+    void returnFromYearMonth() {
+        MonthReturnPoint point = monthReturnPoint;
+        if (point == null) return;
+        beginScreen();
+        applyMonthSource(point);
+        restoringMonthPoint = point;
+        restorePagesRemaining = MetadataLimits.MAX_SCAN_PAGES;
+        int offset = point.mediaId == null ? 0 : point.restoreStart(photoPageSize());
+        startPhotoPaging(photoMode, point.title, offset);
+    }
+
+    private void updateMonthReturnButton() {
+        if (getActivity() instanceof MainActivity)
+            ((MainActivity) getActivity()).setYearMonthReturnVisible(monthReturnPoint != null);
+    }
+
+    private void pauseMonthWork() {
+        if ((selectedMonth == null && restoringMonthPoint == null) || photoPaging == null) return;
+        monthPaused = true;
+        cancelPhotoFocusHandoff();
+        photoRequests.next(); // Invalidate before cancellation can synchronously call back.
+        photoPaging.cancel();
+        if (detailPageCallback != null) {
+            MediaListHolder.PageCallback callback = detailPageCallback;
+            detailPageCallback = null;
+            callback.onPaused("年月浏览已暂停，请显式继续");
+        }
+    }
+
+    private boolean finishMonthRestore() {
+        if (restoringMonthPoint == null) return false;
+        restorePagesRemaining--;
+        Integer position = restoringMonthPoint.mediaId == null ? null : photoPositions.get(restoringMonthPoint.mediaId);
+        if (position != null || restoringMonthPoint.mediaId == null) {
+            String id = restoringMonthPoint.mediaId;
+            boolean restoreFocus = initialPhotoFocusPending;
+            restoringMonthPoint = null;
+            initialPhotoFocusPending = false;
+            finishPhotoPage(true);
+            if (id != null && restoreFocus) {
+                photoFocusHandoffPending = true;
+                photoEntryFocusHandoff = true;
+                photoFocusHandoffTargetId = id;
+                restorePhotoFocusAfterLayout(id, requests.generation(), ++photoFocusHandoffGeneration);
+            }
+            return true;
+        }
+        if (photoPaging.hasMore() && restorePagesRemaining > 0 && photoPageDemand.canStartRequest()) {
+            requestPhotoPage();
+        } else {
+            restoringMonthPoint = null;
+            monthNotice = "原位置未能恢复：照片可能已移动或删除；已显示原来源附近内容。";
+            initialPhotoFocusPending = false;
+            finishPhotoPage(true);
+            if (getActivity() != null) android.widget.Toast.makeText(getActivity(), monthNotice,
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+        return true;
     }
 
     private String absoluteUrl(String url) {
@@ -629,7 +801,8 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void reconcilePhotoPageDemand() {
-        if (photoPaging == null || currentMediaList == null || reflowingWall || photoFocusHandoffPending) return;
+        if (photoPaging == null || currentMediaList == null || reflowingWall || photoFocusHandoffPending
+                || monthPaused || restoringMonthPoint != null) return;
         View card = focusedPhotoWallCard();
         if (card == null) return;
         boolean wasPaused = photoPageDemand.isPaused();
@@ -665,7 +838,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     /** A new photo window starts at its first item, not a column remembered from its parent. */
     private void focusFirstPhotoAfterLoad() {
-        if (!initialPhotoFocusPending) return;
+        if (!initialPhotoFocusPending || pendingReturnedPhoto != null) return;
         initialPhotoFocusPending = false;
         // Finish the loading/empty-state transition first. Leanback may preserve the loading
         // footer or parent's row/column; neither is an explicit photo selection.
@@ -816,9 +989,15 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     @Override public void onStop() {
+        if (monthPicker != null) { monthPicker.dismiss(); monthPicker = null; }
+        // The stop caused by opening detail may arrive after detail has already returned.
+        // Keep that episode owned by detail until onResume confirms the wall took over.
+        if (monthDetailHandoff.shouldPauseWallStop()) pauseMonthWork();
         photoFocusHandoffPending = false;
         photoEntryFocusHandoff = false;
-        initialPhotoFocusPending = false;
+        // Preserve an existing explicit return intention, never recreate one canceled by input.
+        if (!monthDetailHandoff.hasPendingReturn() || pendingReturnedPhoto == null)
+            initialPhotoFocusPending = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         reflowingWall = false;
@@ -891,6 +1070,7 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     public boolean onBackPressed() {
+        if (monthReturnPoint != null) { returnFromYearMonth(); return true; }
         // Media type is a root screen, not a drill-down. Preserve its cursor on first BACK.
         if (isPhotoListView && "media_type".equals(photoMode)) return false;
         if (isPhotoListView) {
@@ -1825,11 +2005,16 @@ public class MainFragment extends BrowseSupportFragment {
     }
 
     private void startPhotoPaging(String mode, String title) {
+        startPhotoPaging(mode, title, 0);
+    }
+
+    private void startPhotoPaging(String mode, String title, int offset) {
         photoMode = mode;
         pagedTitle = title;
         photoPaging = new MainPagingState("shared_album".equals(mode)
-                ? SharedAlbumSupport.MEDIA_PAGE_SIZE : PHOTO_PAGE_SIZE);
+                ? SharedAlbumSupport.MEDIA_PAGE_SIZE : PHOTO_PAGE_SIZE, offset);
         photoWindow = new SlidingPhotoWindow(560, 16);
+        photoWindow.reset(offset);
         currentMediaList = new ArrayList<>();
         photoPositions.clear();
         isPhotoListView = true;
@@ -1841,11 +2026,14 @@ public class MainFragment extends BrowseSupportFragment {
     private void loadPhotoPage() { loadPhotoPage(false); }
 
     private boolean isFilteredPhotoMode() {
-        return "favorites".equals(photoMode) || "media_type".equals(photoMode);
+        return "favorites".equals(photoMode) || "media_type".equals(photoMode)
+                || (selectedMonth != null && "album".equals(photoMode));
     }
 
     private void loadPhotoPage(boolean explicit) {
         if (photoPaging == null || photoPaging.isLoading() || applyingPage) return;
+        if (monthPaused && !explicit) return;
+        if (explicit) monthPaused = false;
         if (loadingPreviousPhotos || previousScanPaused) {
             loadPreviousPhotoPage(explicit);
             return;
@@ -1863,7 +2051,7 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoPage(true);
             return;
         }
-        if (isFilteredPhotoMode() && !photoScan.start(explicit)) return;
+        if (isFilteredPhotoMode() && restoringMonthPoint == null && !photoScan.start(explicit)) return;
         requestPhotoPage();
     }
 
@@ -1891,21 +2079,36 @@ public class MainFragment extends BrowseSupportFragment {
         applyPendingPhotoReturn();
     }
 
-    private void applyPendingPhotoReturn() {
+    void applyPendingPhotoReturn() {
         if (pendingReturnedPhoto == null || photoPaging == null || photoPaging.isLoading()) return;
+        // A deferred month detail return owns one explicit focus intention. Wait until the
+        // wall can receive it instead of losing it while the detail window is still closing.
+        if (selectedMonth != null && (!isResumed() || !(getActivity() instanceof MainActivity)
+                || !((MainActivity) getActivity()).canFocusBrowseContent())) return;
+        boolean restoreMonthFocus = selectedMonth != null && initialPhotoFocusPending;
+        if (restoreMonthFocus) initialPhotoFocusPending = false;
         MediaItem item = pendingReturnedPhoto;
         pendingReturnedPhoto = null;
         if (!photoPositions.containsKey(item.getId())) {
             relocatePhotoWindow(item, false);
-            loadPhotoPage(true);
+            // A detail that was genuinely backgrounded keeps its explicit-resume boundary.
+            // The returned anchor can be shown without restarting canceled network work.
+            if (!monthPaused) loadPhotoPage(true);
         }
         final String id = item.getId();
         final long generation = requests.generation();
-        positionHandler.post(() -> {
-            if (!requests.isCurrent(generation)) return;
-            Integer position = photoPositions.get(id);
-            if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
-        });
+        if (restoreMonthFocus) {
+            photoFocusHandoffPending = true;
+            photoEntryFocusHandoff = true;
+            photoFocusHandoffTargetId = id;
+            restorePhotoFocusAfterLayout(id, generation, ++photoFocusHandoffGeneration);
+        } else {
+            positionHandler.post(() -> {
+                if (!requests.isCurrent(generation)) return;
+                Integer position = photoPositions.get(id);
+                if (position != null) restoreCardSelection(position / wallLayout.columns, position % wallLayout.columns);
+            });
+        }
     }
 
     private void preparePhotoDirection(boolean previous) {
@@ -1926,6 +2129,8 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void loadPreviousPhotoPage(boolean explicit) {
         if (photoWindow == null || photoPaging.isLoading() || applyingPage) return;
+        if (monthPaused && !explicit) return;
+        if (explicit) monthPaused = false;
         if (explicit) {
             previousScanRemaining = MetadataLimits.MAX_SCAN_PAGES;
             previousScanPaused = false;
@@ -1988,6 +2193,7 @@ public class MainFragment extends BrowseSupportFragment {
             finishPhotoPage(true);
             return;
         }
+        if (monthPaused) return;
         final int offset = photoPaging.begin();
         if (offset < 0) {
             finishPhotoPage(true);
@@ -2001,10 +2207,12 @@ public class MainFragment extends BrowseSupportFragment {
         updatePageFooter(photoPaging, currentMediaList.size());
         Call<FnHttpApi.GalleryListResponse> request;
         if ("shared_album".equals(photoMode)) {
-            String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.CONTENT_PATH, "GET",
-                    SharedAlbumSupport.contentQuery(photoAlbumId, offset, limit));
-            request = api.getSharedAlbumPhotos(token, authx, photoAlbumId, SharedAlbumSupport.START_TIME,
-                    SharedAlbumSupport.END_TIME, offset, limit, "desc");
+            String start = selectedMonth == null ? SharedAlbumSupport.START_TIME : selectedMonth.startTime();
+            String end = selectedMonth == null ? SharedAlbumSupport.END_TIME : selectedMonth.endTime();
+            String params = "albumId=" + photoAlbumId + "&endTime=" + end + "&limit=" + limit
+                    + "&offset=" + offset + "&sortDirection=desc&startTime=" + start;
+            String authx = FnAuthUtils.generateAuthX(SharedAlbumSupport.CONTENT_PATH, "GET", params);
+            request = api.getSharedAlbumPhotos(token, authx, photoAlbumId, start, end, offset, limit, "desc");
         } else if ("album".equals(photoMode)) {
             String params = "album_id=" + photoAlbumId + "&sort_by=date_time&sort_direction=desc&offset="
                     + offset + "&limit=" + limit;
@@ -2014,6 +2222,7 @@ public class MainFragment extends BrowseSupportFragment {
             String dateTime = "media_type".equals(photoMode) ? null : photoDate.replace("-", ":");
             String start = "media_type".equals(photoMode) ? photoRangeStart : dateTime + " 00:00:00";
             String end = "media_type".equals(photoMode) ? photoRangeEnd : dateTime + " 23:59:59";
+            if (selectedMonth != null) { start = selectedMonth.startTime(); end = selectedMonth.endTime(); }
             if ("person".equals(photoMode)) {
                 String params = "album_id=" + photoPersonId + "&endTime=" + end + "&end_time=" + end
                         + "&limit=" + limit + "&offset=" + offset + "&personId=" + photoPersonId
@@ -2028,7 +2237,7 @@ public class MainFragment extends BrowseSupportFragment {
                 request = api.getPhotosByTimeRange(token, authx, start, end, limit, offset, "index");
             }
         }
-        enqueue(request, new Callback<FnHttpApi.GalleryListResponse>() {
+        enqueuePhoto(request, new Callback<FnHttpApi.GalleryListResponse>() {
             @Override public void onResponse(Call<FnHttpApi.GalleryListResponse> call,
                     Response<FnHttpApi.GalleryListResponse> response) {
                 FnHttpApi.GalleryListResponse result = response.body();
@@ -2053,6 +2262,11 @@ public class MainFragment extends BrowseSupportFragment {
                 // eviction of the older page. The resident snapshot performs display deduplication.
                 for (int index = 0; !photoPaging.hasFailed() && index < result.data.list.size(); index++) {
                     FnHttpApi.GalleryPhoto photo = result.data.list.get(index);
+                    if (selectedMonth != null && "album".equals(photoMode)) {
+                        YearMonthRange.Match match = selectedMonth.matchCaptureDate(photo.photoDateTime);
+                        if (match == YearMonthRange.Match.UNKNOWN) monthHasUnknownDates = true;
+                        if (match != YearMonthRange.Match.MATCH) continue;
+                    }
                     if (!PhotoSelection.includes("favorites".equals(photoMode), photo.isCollect)
                             || !PhotoSelection.matchesCategory("media_type".equals(photoMode) ? photoCategory : null, photo.category)) continue;
                     MediaItem item;
@@ -2138,6 +2352,8 @@ public class MainFragment extends BrowseSupportFragment {
                     }
                     installPhotoWindow(photoWindow.firstOffset() != oldStart, false);
                 }
+                if (!incoming.isEmpty() && selectedMonth != null) monthEverMatched = true;
+                if (finishMonthRestore()) return;
                 if ("media_type".equals(photoMode)) rootLoadSucceeded();
                 // Sparse filters get a finite raw-page budget per action. The
                 // paused footer, not a false "empty/end", invites explicit continuation.
@@ -2271,7 +2487,10 @@ public class MainFragment extends BrowseSupportFragment {
     private void updatePageFooter(MainPagingState state, int count) {
         if (state == null) return;
         String status;
-        if (state.isLoading()) status = "正在加载 · 本批 " + count + " 项";
+        if (state == photoPaging && monthPaused) status = "年月浏览已暂停 · 确定继续 · 已查 " + state.getOffset() + " 条";
+        else if (state.isLoading()) status = selectedMonth != null || restoringMonthPoint != null
+                ? "正在查找 · 已查 " + state.getOffset() + " 条 · 当前 " + count + " 项"
+                : "正在加载 · 本批 " + count + " 项";
         else if (state.isOffsetLimited()) status = "偏移到上限 · 请缩小范围";
         else if (state.hasInvalidPage()) status = "响应异常 · 确定重试";
         else if (state.hasFailed()) {
@@ -2292,6 +2511,14 @@ public class MainFragment extends BrowseSupportFragment {
         else status = count == 0 ? (sharedAlbumDirectory ? "暂无共享相册"
                 : "shared_album".equals(photoMode) ? "相册为空" : "扫描到末尾 · 本批无匹配")
                 : "已到末尾 · 本批 " + count + " 项";
+        if (state == photoPaging && selectedMonth != null && !state.isLoading() && !state.hasMore()
+                && !state.hasFailed() && !state.isStalled() && !state.isOffsetLimited()) {
+            if (monthHasUnknownDates) status = "日期信息不完整 · 部分照片无法按拍摄月份判断";
+            else if (!monthEverMatched) status = selectedMonth.label() + "没有匹配照片或视频";
+        }
+        if (monthHasUnknownDates && state == photoPaging && state.hasMore())
+            status += " · 部分媒体缺少有效拍摄日期";
+        if (monthNotice != null && state == photoPaging) status += " · " + monthNotice;
         if (state == photoPaging && photoWindow != null) {
             status += " · 驻留 " + count + " 项 / 原始范围 " + photoWindow.firstOffset() + "–" + photoWindow.nextOffset();
         }
@@ -2309,6 +2536,11 @@ public class MainFragment extends BrowseSupportFragment {
 
     private void updatePagedState(MainPagingState state, int count) {
         // The footer and its paging actions stay intact; the panel only explains a window with no cards.
+        if (state == photoPaging && count == 0 && monthPaused) {
+            showState(new BrowseStatus("年月浏览已暂停", "已查 " + state.getOffset()
+                    + " 条。扫描尚未结束；可继续或返回原位置。"), "继续查找", () -> loadPhotoPage(true));
+            return;
+        }
         BrowseStatus.Page presentation = BrowseStatus.page(state, count,
                 state == photoPaging && photoScan.isPaused());
         if (presentation == BrowseStatus.Page.CONTENT) {
@@ -2319,7 +2551,8 @@ public class MainFragment extends BrowseSupportFragment {
             return;
         }
         if (presentation == BrowseStatus.Page.LOADING) {
-            showLoadingOverlay("正在加载" + (pagedTitle == null ? "内容" : pagedTitle));
+            showLoadingOverlay("正在加载" + (pagedTitle == null ? "内容" : pagedTitle)
+                    + (selectedMonth == null && restoringMonthPoint == null ? "" : " · 已查 " + state.getOffset() + " 条"));
             return;
         }
         Runnable retry = () -> {
@@ -2340,19 +2573,28 @@ public class MainFragment extends BrowseSupportFragment {
                         "浏览其他内容", this::openBrowseMenu);
                 break;
             case CONTINUE:
-                showState(new BrowseStatus("尚未找到匹配内容", "当前扫描尚未结束，可以继续查找；此状态不代表没有内容。"),
+                showState(new BrowseStatus("尚未找到匹配内容", "已查 " + state.getOffset()
+                        + " 条。当前扫描尚未结束，可以继续查找；此状态不代表没有内容。"),
                         "继续查找", retry);
                 break;
             case EMPTY:
                 BrowseStatus empty;
-                if (state.getOffset() > 0) {
+                if (monthNotice != null && state == photoPaging) {
+                    empty = new BrowseStatus("原位置未能恢复", monthNotice);
+                } else if (selectedMonth != null && state == photoPaging) {
+                    empty = monthHasUnknownDates
+                            ? new BrowseStatus("日期信息不完整", "部分媒体缺少有效拍摄日期，不能确认该月没有照片。可返回原位置查看。")
+                            : new BrowseStatus(monthEverMatched ? "已到该月末尾" : selectedMonth.label() + "没有匹配照片或视频",
+                                    "已读完服务端当前范围。按返回键恢复原来源；数据变动可能影响恢复位置。");
+                } else if (state.getOffset() > 0) {
                     empty = new BrowseStatus("本批没有匹配内容", "已扫描到当前范围末尾，本批没有可显示的内容。可返回或切换其他浏览方式。");
                 } else if (albumDirectory || sharedAlbumDirectory || "media_type".equals(photoMode)) {
                     empty = BrowseStatus.empty(rootBrowseMode);
                 } else {
                     empty = new BrowseStatus("当前范围暂无照片或视频", "NAS 返回的此相册、日期或人物范围内没有内容。可按返回键查看其他内容。");
                 }
-                showState(empty, "浏览其他内容", this::openBrowseMenu);
+                if (monthReturnPoint != null) showState(empty, "返回原位置", this::returnFromYearMonth);
+                else showState(empty, "浏览其他内容", this::openBrowseMenu);
                 break;
             default: break;
         }
@@ -2741,6 +2983,7 @@ public class MainFragment extends BrowseSupportFragment {
             }
         }
 
+        final MonthDetailHandoff.DetailSession detailSession = monthDetailHandoff.openDetail();
         if (photoPaging == null) {
             final String boundary = geoBoundaryMessage;
             MediaListHolder.set(currentMediaList, boundary == null ? null : new MediaListHolder.PageSource() {
@@ -2762,12 +3005,24 @@ public class MainFragment extends BrowseSupportFragment {
                 private String anchorBoundary;
                 private DetailScanContinuation scanContinuation = new DetailScanContinuation();
                 @Override public boolean isWindowed() { return true; }
+                @Override public boolean pausesOnHostStop() {
+                    return detailSession.shouldPauseStop(isResumed())
+                            && (selectedMonth != null || restoringMonthPoint != null);
+                }
+                @Override public void onHostStopped() {
+                    if (active() && detailSession.shouldPauseStop(isResumed())) pauseMonthWork();
+                }
                 @Override public void setAnchor(MediaItem item) {
                     detailAnchorId = item.getId();
                     detailAnchorItem = item;
                 }
                 @Override public void onReturn(MediaItem item) {
-                    if (active()) restoreReturnedPhoto(item);
+                    if (!active() || !detailSession.isCurrent()) return;
+                    // This declares return intent, not foreground ownership. A delayed wall
+                    // onStop still belongs to the detail launch until the wall resumes.
+                    detailSession.returnToWall();
+                    if (selectedMonth != null) initialPhotoFocusPending = true;
+                    restoreReturnedPhoto(item);
                 }
                 @Override public void setAnchorId(String id) {
                     detailAnchorId = id;
@@ -2789,6 +3044,7 @@ public class MainFragment extends BrowseSupportFragment {
                 }
                 @Override public String getBoundaryMessage() {
                     if (!active() || photoPaging == null) return "列表已切换，请返回列表重新打开";
+                    if (monthHasUnknownDates && !photoWindow.hasMore()) return "部分媒体缺少有效拍摄日期，月份结果可能不完整";
                     if (anchorBoundary != null) return anchorBoundary;
                     if (photoPaging.isStalled()) return "服务器返回重复或矛盾空页；结果可能不完整，请刷新";
                     if (photoPaging.isOffsetLimited()) return "已到接口偏移上限，请缩小查询范围";
@@ -2806,6 +3062,8 @@ public class MainFragment extends BrowseSupportFragment {
                     // Same range/query generation and API parameters, fresh raw offset zero.
                     // Do not use startPhotoPaging: entry focus and navigation are not new here.
                     photoWindow = new SlidingPhotoWindow(560, 16);
+                    monthHasUnknownDates = false;
+                    monthEverMatched = false;
                     photoPaging = new MainPagingState(photoPageSize());
                     loadingPreviousPhotos = false;
                     previousScanPaused = false;
@@ -2876,7 +3134,7 @@ public class MainFragment extends BrowseSupportFragment {
                     detailPageCallback = new MediaListHolder.PageCallback() {
                         private boolean waitedForOpposite = oppositeInFlight || (relocate && photoPaging.isLoading());
                         private boolean continueOpposite() {
-                            if (!waitedForOpposite) return false;
+                            if (monthPaused || !waitedForOpposite) return false;
                             waitedForOpposite = false;
                             detailPageCallback = this;
                             preparePhotoDirection(previous);
@@ -2906,6 +3164,9 @@ public class MainFragment extends BrowseSupportFragment {
                         @Override public void onFailure() { callback.onFailure(); }
                         @Override public void onPaused(String message) {
                             if (!active()) { callback.onFailure(); return; }
+                            // Host-stop cancellation is a terminal notification for this gesture.
+                            // Do not turn it into an explicit opposite-direction continuation.
+                            if (monthPaused) { callback.onPaused(message); return; }
                             List<MediaItem> rows = snapshot(previous);
                             if (relocate && continueOpposite()) return;
                             if (hasNeighbor(rows, previous)) deliver(rows, callback);
@@ -2929,6 +3190,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        // Result delivery can precede onResume; it does not finish the stop handoff.
         if (requestCode != SHARED_DETAIL_REQUEST || resultCode != android.app.Activity.RESULT_OK
                 || data == null || photoPaging == null) return;
         final String id = data.getStringExtra("LAST_MEDIA_ID");

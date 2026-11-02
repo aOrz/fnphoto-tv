@@ -179,6 +179,9 @@ public class MainActivity extends FragmentActivity {
         menuAdapter.add(new MenuItem("收藏", "favorites"));
         menuAdapter.add(new MenuItem("最近添加", "recent"));
         menuAdapter.add(new MenuItem("搜索", "search"));
+        // Always reachable with MENU, even when UP at a virtualized wall edge loads older rows.
+        menuAdapter.add(new MenuItem("跳转年月", "year_month"));
+        menuAdapter.add(new MenuItem("返回原位置", "year_month_return"));
         
         // 第二组：相册分类
         menuAdapter.add(new MenuItem("相册", "albums"));
@@ -227,6 +230,26 @@ public class MainActivity extends FragmentActivity {
         if (menuButton != null) {
             menuButton.setFocusable(true);
             menuButton.setOnClickListener(v -> openBrowseMenu());
+        }
+        findViewById(R.id.btn_year_month).setOnClickListener(v -> {
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.showYearMonthPicker();
+        });
+        findViewById(R.id.btn_year_month_return).setOnClickListener(v -> {
+            MainFragment fragment = (MainFragment) getSupportFragmentManager()
+                    .findFragmentById(R.id.main_content_container);
+            if (fragment != null) fragment.returnFromYearMonth();
+        });
+    }
+
+    void setYearMonthReturnVisible(boolean visible) {
+        View button = findViewById(R.id.btn_year_month_return);
+        boolean wasFocused = button.hasFocus();
+        button.setVisibility(visible ? View.VISIBLE : View.GONE);
+        // A removed top-bar action must not strand focus. Do not compete with an open drawer/dialog.
+        if (!visible && wasFocused && canFocusBrowseContent()) {
+            findViewById(R.id.btn_year_month).requestFocus();
         }
     }
 
@@ -313,10 +336,12 @@ public class MainActivity extends FragmentActivity {
 
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) monthBackOwned = false;
         if (hasFocus && drawerLayout != null) {
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
             if (fragment != null) {
+                fragment.applyPendingPhotoReturn();
                 if (getCurrentFocus() == null) fragment.focusBrowseContent();
                 fragment.schedulePhotoDemandCheck();
             }
@@ -378,6 +403,19 @@ public class MainActivity extends FragmentActivity {
             return;
         }
         switch (item.getAction()) {
+            case "year_month":
+            case "year_month_return":
+                // Finish closing before a fast local response can restore the saved media ID.
+                browseMenuActive = false;
+                drawerLayout.closeDrawer(GravityCompat.END, false);
+                MainFragment monthFragment = (MainFragment) getSupportFragmentManager()
+                        .findFragmentById(R.id.main_content_container);
+                if (monthFragment != null) {
+                    if ("year_month".equals(item.getAction())) monthFragment.showYearMonthPicker();
+                    else if (findViewById(R.id.btn_year_month_return).isShown()) monthFragment.returnFromYearMonth();
+                    else Toast.makeText(this, "尚未跳转年月，没有待恢复的原位置", Toast.LENGTH_SHORT).show();
+                }
+                return;
             case "search":
                 openSearch();
                 return;
@@ -456,11 +494,19 @@ public class MainActivity extends FragmentActivity {
     }
 
     private boolean virtualUpOwned;
+    private boolean monthBackOwned;
+    private boolean dispatchingKeyRelease;
 
     // Old AndroidX marks the public Activity/Window.Callback override restricted.
     // Delegate to that framework entry point; no private AndroidX helper is used.
     @android.annotation.SuppressLint("RestrictedApi")
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        // A month Back action starts restoration on DOWN. Its matching UP is not a new
+        // gesture: Activity.dispatchKeyEvent would otherwise cancel the pending focus handoff.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && monthBackOwned) {
+            if (event.getAction() == KeyEvent.ACTION_UP) monthBackOwned = false;
+            return true;
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             androidx.fragment.app.Fragment fragment = getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
@@ -481,12 +527,19 @@ public class MainActivity extends FragmentActivity {
                 }
             }
         }
-        return super.dispatchKeyEvent(event);
+        // Activity calls onUserInteraction for both halves of a key gesture. Only the
+        // initial press is a new focus intention; its release must not undo navigation.
+        dispatchingKeyRelease = event.getAction() == KeyEvent.ACTION_UP;
+        try {
+            return super.dispatchKeyEvent(event);
+        } finally {
+            dispatchingKeyRelease = false;
+        }
     }
 
     @Override public void onUserInteraction() {
         super.onUserInteraction();
-        cancelPendingPhotoFocusHandoff();
+        if (!dispatchingKeyRelease) cancelPendingPhotoFocusHandoff();
     }
 
     @Override
@@ -508,7 +561,9 @@ public class MainActivity extends FragmentActivity {
             // 检查 MainFragment 是否需要处理返回键（返回到时间线）
             MainFragment fragment = (MainFragment) getSupportFragmentManager()
                     .findFragmentById(R.id.main_content_container);
+            boolean returningFromMonth = findViewById(R.id.btn_year_month_return).isShown();
             if (fragment != null && fragment.onBackPressed()) {
+                if (returningFromMonth) monthBackOwned = true;
                 return true;  // MainFragment 处理了返回键
             }
             

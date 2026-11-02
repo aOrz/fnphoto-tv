@@ -64,6 +64,7 @@
 | 空/加载/错误状态 | `TvStateView`、`BrowseStatus`、`GridScreenState` 及同名状态测试；设备 `EmptyStateDeviceTest`，见 [TV 列表状态](../empty-states.md) |
 | 浏览类型恢复 | `BrowseMode`、`BrowseSelection`、`BrowseSelectionTest` |
 | 主列表分页/取消 | `SlidingPhotoWindow`、`MainPagingState`、`MainMetadataWindow`、`MainRequestScope`、`SparseScanBudget`、`PhotoPageDemand` 及同名 Test |
+| 年月导航 | `YearMonthPicker`、`YearMonthRange`、`MonthReturnPoint`、`MainFragment.selectYearMonth/returnFromYearMonth`；`YearMonthRangeTest`、`MonthReturnPointTest`、`MediaPageStopTest`；见 [年月说明](../year-month-navigation.md) |
 | 文件夹/搜索 | `paging/GridPageState`、`paging/FolderNavigationState` 及同名 Test |
 | 详情/播放 | `MediaPageController`、`DetailLoadState`、`DetailPreloadScope`、`DetailPlaybackState`、`DetailSessionStore`；`VideoRemoteInput`、`VideoSeekState`、`VideoControls`；`MediaDetailLifecycleTest`、`DetailPreloadScopeTest`、`player/*Test`，设备测试 `VideoRemoteInstrumentationTest` |
 | 图片生命周期 | `cache/CachedImageLoader`、`ImageRequestScope`、`ImageCacheManager`；`ImagePipelineTest` |
@@ -88,6 +89,11 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 显示无图片、无固定“加载状态”标题的文字条，终止与加载/重试仍明确区分。一次自动需求最多请求五个原始页，
 失败、稀疏暂停仍需明确操作，主照片墙不再通过“下一批”丢弃整窗，设备场景见 QA 清单 A15–A18。
 
+[年月跳转](../year-month-navigation.md) 只在已打开的分页照片墙内切换月份，保留来源和本地筛选；
+图库、人物与共享使用既有日期参数，普通相册按 `photoDateTime` 分批扫描，每次最多五页并可显式继续。
+未知拍摄日期不能据此宣称空月。返回仅保留一个原来源/原始坐标/稳定 ID，重新读取有限附近范围，
+不保留全量索引或承诺数据变动后精确恢复；目录、最近添加、地点、文件夹和搜索不在年月功能范围。
+
 ## 已有文档的用途与冲突处理
 
 保留已有专题作为详细资料，不在这里复制历史报告。遇到冲突先读当前实现与测试，
@@ -99,6 +105,7 @@ Java 文件位于上述生产或测试包；Python 文件位于 `test/`。不要
 | [test/README.md](../../test/README.md)、[QA_CHECKLIST.md](../../test/QA_CHECKLIST.md) | 合成数据命令与设备判定标准；清单不是已经执行的结果 |
 | [large-library-boundaries.md](../large-library-boundaries.md) | 当前有限窗口、扫描、目录历史和恢复边界 |
 | [large-library-api-contract.md](../large-library-api-contract.md) | 地点/日期合同的证据范围及边界 fixture |
+| [year-month-navigation.md](../year-month-navigation.md) | 照片墙年月入口、来源合同、普通相册扫描和有限位置恢复；真实 NAS 时间语义仍需验证 |
 | [slideshow.md](../slideshow.md) | 当前范围循环、可选间隔、暂停/继续、视频开关与完整来源边界 |
 | [video-remote-controls.md](../video-remote-controls.md) | 视频方向键定位、显式切媒体、触屏、媒体键与设备验证方法 |
 | [shared-albums.md](../shared-albums.md) | 已实现的接收方共享浏览；来源是客户端交接/参考实现，真实 NAS 仍需联调 |

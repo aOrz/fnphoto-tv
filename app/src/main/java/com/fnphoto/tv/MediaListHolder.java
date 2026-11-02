@@ -17,6 +17,10 @@ public class MediaListHolder {
         default void setAnchor(MediaItem item) { setAnchorId(item.getId()); }
         /** Return the exact displayed model even if its owner window has already moved. */
         default void onReturn(MediaItem item) { }
+        /** Opt in only when stopping also preserves or cancels the owner's delivery cursor. */
+        default boolean pausesOnHostStop() { return false; }
+        /** Stop background work without closing the live source; later input may request again. */
+        default void onHostStopped() { }
         default boolean hasPrevious() { return false; }
         default void loadPrevious(PageCallback callback) { callback.onFailure(); }
         void loadMore(PageCallback callback);

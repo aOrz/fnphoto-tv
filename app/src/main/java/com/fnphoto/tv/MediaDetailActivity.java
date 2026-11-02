@@ -1702,7 +1702,7 @@ public class MediaDetailActivity extends FragmentActivity {
         releasePlayers();
         playbackHandler.removeCallbacksAndMessages(null);
         slideshow.stop();
-        if (pageController != null) pageController.discardRestart();
+        if (pageController != null) pageController.onHostStopped();
         slideshowHandler.removeCallbacksAndMessages(null);
         debounceHandler.removeCallbacksAndMessages(null);
         canSwitch = true;

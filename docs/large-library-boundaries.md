@@ -46,6 +46,37 @@ ordering without a server cursor/snapshot contract. Reloaded intervals can chang
 refresh/re-entry starts a new traversal. Neither the sliding window nor view
 recycling guarantees that every device is OOM-free.
 
+## Year/month navigation
+
+[Year/month navigation](year-month-navigation.md) is limited to already-open paged
+photo walls: gallery/favorite/person dates, ordinary/shared albums and local media
+type filtering. It replaces the entry day's bounds with the selected month while
+keeping the source IDs and local favorite/category constraints. Directories,
+recent additions, location results, folder browsing and search do not gain month
+navigation. Recent additions have no verified month contract; a gallery month
+request must not silently widen that source to the full library.
+Gallery/person/shared walls reuse their existing date parameters. Shared month
+bounds remain within the established 2000–2099 default range.
+
+Ordinary `album/photos` has no verified date-filter parameter. It scans raw pages
+with the existing five-page budget and an explicit continue action, matching only
+valid `photoDateTime` capture text. `dateTime` can mean upload time and is not a
+fallback; filenames/titles are not dates. Missing or invalid capture dates keep an
+incomplete-results notice even after a terminal page, so they cannot establish an
+empty month. Sorting by `date_time` does not justify binary search or early stop
+by capture month. No full-library scan/index is retained in memory, and all
+560-row/16-page/561-item and per-response byte limits remain in force.
+
+Only one `MonthReturnPoint` is retained: the original query/source, its raw
+coordinate, and the selected stable ID. Return re-fetches at most five nearby
+pages, starting up to two page lengths before the old coordinate, and locates the
+ID in that bounded result. A month-query offset is never reused as an original
+query offset. Failure to find the ID is explicit; deletion, movement, short pages
+or other dataset changes can prevent exact recovery. There is no retained media
+snapshot or bookmark chain, and the return point is not persisted across process
+death. Background month work pauses and requires explicit continuation; this is
+not proof of UI lifecycle behavior without device evidence for the tested APK.
+
 ## Image memory ownership
 
 Glide requests retain their existing finite decode dimensions and holder cleanup;

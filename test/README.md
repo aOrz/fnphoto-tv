@@ -153,3 +153,10 @@ python test/qa_server.py shared-control --state-dir test/.generated/shared-state
 其他模式：`empty` 返回空共享目录；`list-failure` 返回列表 HTTP 503；`revoked` 返回内容 HTTP 403。`page-failure` 仅令内容 offset >= 50 返回 503。以上状态和错误码均是**测试注入，不是已确认 NAS 的权限撤销/错误合同**。每轮结束用 `--mode normal` 重置（同时将 delay 清零）。列表和内容请求在收到时读入状态并等待延迟，因此能够重现旧响应晚到的顺序。
 
 自动测试：`python -m unittest discover -s test -p 'test_shared_fixtures.py' -v`。覆盖参数大小写/范围、独立共享目录、三页内容、空态、真实 JPEG、失败/重试、撤权以及延迟响应顺序；Android 页面、焦点和播放器需另行实际操作验证，不能由 fixture 单测推断通过。
+
+## 7. 年月导航与普通相册分批扫描
+
+[年月合成 QA](YEAR_MONTH_QA.md) 提供独立的 `year_month_server.py`：普通相册五页后暂停、
+乱序拍摄日期、未知日期、空月、短页、原坐标重试、重复页和源数据变化，以及真正按月份过滤的
+图库/人物/共享来源。默认端口 5668，仅 loopback；不改变上述默认 profile。
+合同测试为 `python -m unittest discover -s test -p 'test_year_month_contract.py' -v`，不能代替设备或真实 NAS 验证。
