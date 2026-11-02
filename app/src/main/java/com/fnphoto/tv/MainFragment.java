@@ -71,7 +71,7 @@ public class MainFragment extends BrowseSupportFragment {
     private boolean monthHasUnknownDates;
     private boolean monthEverMatched;
     private boolean monthPaused;
-    private boolean monthDetailOpen;
+    private final MonthDetailHandoff monthDetailHandoff = new MonthDetailHandoff();
     private YearMonthPicker monthPicker;
     private String monthNotice;
     private SlidingPhotoWindow photoWindow;
@@ -277,6 +277,7 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onResume() {
         super.onResume();
+        monthDetailHandoff.wallResumed();
         applyPendingPhotoReturn();
         schedulePhotoDemandCheck();
         if (getActivity() == null) return;
@@ -328,7 +329,7 @@ public class MainFragment extends BrowseSupportFragment {
         monthEverMatched = false;
         monthPaused = false;
         monthNotice = null;
-        monthDetailOpen = false;
+        monthDetailHandoff.reset();
         if (monthPicker != null) { monthPicker.dismiss(); monthPicker = null; }
         updateMonthReturnButton();
         lazyLoadHandler.removeCallbacksAndMessages(null);
@@ -529,6 +530,7 @@ public class MainFragment extends BrowseSupportFragment {
     private void pauseMonthWork() {
         if ((selectedMonth == null && restoringMonthPoint == null) || photoPaging == null) return;
         monthPaused = true;
+        cancelPhotoFocusHandoff();
         photoRequests.next(); // Invalidate before cancellation can synchronously call back.
         photoPaging.cancel();
         if (detailPageCallback != null) {
@@ -988,10 +990,14 @@ public class MainFragment extends BrowseSupportFragment {
 
     @Override public void onStop() {
         if (monthPicker != null) { monthPicker.dismiss(); monthPicker = null; }
-        if (!monthDetailOpen) pauseMonthWork();
+        // The stop caused by opening detail may arrive after detail has already returned.
+        // Keep that episode owned by detail until onResume confirms the wall took over.
+        if (monthDetailHandoff.shouldPauseWallStop()) pauseMonthWork();
         photoFocusHandoffPending = false;
         photoEntryFocusHandoff = false;
-        initialPhotoFocusPending = false;
+        // Preserve an existing explicit return intention, never recreate one canceled by input.
+        if (!monthDetailHandoff.hasPendingReturn() || pendingReturnedPhoto == null)
+            initialPhotoFocusPending = false;
         photoFocusHandoffGeneration++;
         photoFocusHandoffTargetId = null;
         reflowingWall = false;
@@ -2977,6 +2983,7 @@ public class MainFragment extends BrowseSupportFragment {
             }
         }
 
+        final MonthDetailHandoff.DetailSession detailSession = monthDetailHandoff.openDetail();
         if (photoPaging == null) {
             final String boundary = geoBoundaryMessage;
             MediaListHolder.set(currentMediaList, boundary == null ? null : new MediaListHolder.PageSource() {
@@ -2997,24 +3004,23 @@ public class MainFragment extends BrowseSupportFragment {
                 private int deliveredLastRaw = currentMediaList.get(currentMediaList.size() - 1).getBrowseRawOffset();
                 private String anchorBoundary;
                 private DetailScanContinuation scanContinuation = new DetailScanContinuation();
-                private boolean returningToWall;
                 @Override public boolean isWindowed() { return true; }
                 @Override public boolean pausesOnHostStop() {
-                    return !returningToWall && (selectedMonth != null || restoringMonthPoint != null);
+                    return detailSession.shouldPauseStop(isResumed())
+                            && (selectedMonth != null || restoringMonthPoint != null);
                 }
                 @Override public void onHostStopped() {
-                    if (active() && !returningToWall) pauseMonthWork();
+                    if (active() && detailSession.shouldPauseStop(isResumed())) pauseMonthWork();
                 }
                 @Override public void setAnchor(MediaItem item) {
                     detailAnchorId = item.getId();
                     detailAnchorItem = item;
                 }
                 @Override public void onReturn(MediaItem item) {
-                    if (!active()) return;
-                    // Finishing detail returns to the foreground wall, rather than backgrounding
-                    // the month query. Its pending response still owns the deferred ID restore.
-                    returningToWall = true;
-                    monthDetailOpen = false;
+                    if (!active() || !detailSession.isCurrent()) return;
+                    // This declares return intent, not foreground ownership. A delayed wall
+                    // onStop still belongs to the detail launch until the wall resumes.
+                    detailSession.returnToWall();
                     if (selectedMonth != null) initialPhotoFocusPending = true;
                     restoreReturnedPhoto(item);
                 }
@@ -3179,13 +3185,12 @@ public class MainFragment extends BrowseSupportFragment {
         Intent intent = new Intent(getActivity(), MediaDetailActivity.class);
         intent.putExtra("CURRENT_INDEX", index);
         intent.putExtra("SHARED_ALBUM_READ_ONLY", "shared_album".equals(photoMode));
-        monthDetailOpen = true;
         startActivityForResult(intent, SHARED_DETAIL_REQUEST);
     }
 
     @Override public void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == SHARED_DETAIL_REQUEST) monthDetailOpen = false;
+        // Result delivery can precede onResume; it does not finish the stop handoff.
         if (requestCode != SHARED_DETAIL_REQUEST || resultCode != android.app.Activity.RESULT_OK
                 || data == null || photoPaging == null) return;
         final String id = data.getStringExtra("LAST_MEDIA_ID");

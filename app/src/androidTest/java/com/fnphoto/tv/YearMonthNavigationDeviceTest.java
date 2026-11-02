@@ -11,6 +11,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -147,6 +148,7 @@ public class YearMonthNavigationDeviceTest {
     }
 
     @Test public void remoteEntryYearMonthBackAndConfirmationUseRealDialog() throws Exception {
+        recordTopBarVisibility(false);
         openPickerWithRemote();
         await(() -> pickerDialog().isShowing() && !pickerChoosingMonth());
         assertEquals("选择月份", ui(() -> ((TextView) pickerDialog().getCurrentFocus()).getText().toString()));
@@ -173,6 +175,36 @@ public class YearMonthNavigationDeviceTest {
         await(() -> selectedMonth() != null && selectedMonth().year == year && selectedMonth().month == month);
         assertTrue("Return is a reachable top-bar action", ui(() -> activity.findViewById(
                 R.id.btn_year_month_return).isShown()));
+        screenshot("top-bar-actions-with-return");
+        recordTopBarVisibility(true);
+    }
+
+    private void recordTopBarVisibility(boolean assertVisible) throws Exception {
+        ui(() -> {
+            Rect visibleFrame = new Rect();
+            activity.getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleFrame);
+            for (int id : new int[] { R.id.btn_year_month, R.id.btn_year_month_return, R.id.btn_menu }) {
+                View button = activity.findViewById(id);
+                if (!button.isShown()) continue;
+                Rect bounds = new Rect();
+                boolean visible = button.getGlobalVisibleRect(bounds);
+                String label = ((TextView) button).getText().toString();
+                String diagnostic = label + " measured=" + button.getMeasuredWidth() + "x"
+                        + button.getMeasuredHeight() + " global=" + bounds.toShortString()
+                        + " visibleFrame=" + visibleFrame.toShortString();
+                System.out.println("MONTH_TOP_BAR " + (assertVisible ? "month" : "original") + " " + diagnostic);
+                // The handheld API19 image can overlay its system navigation bar on
+                // the existing menu. Record that separately; gate the new actions here.
+                if (assertVisible && id != R.id.btn_menu) {
+                    assertTrue("Top-bar action must be visible: " + diagnostic, visible);
+                    assertEquals("Top-bar action width must not be clipped: " + diagnostic,
+                            button.getMeasuredWidth(), bounds.width());
+                    assertTrue("Top-bar action must fit the visible display: " + diagnostic,
+                            visibleFrame.contains(bounds));
+                }
+            }
+            return null;
+        });
     }
 
     @Test public void ordinaryAlbumPausesAfterFivePagesThenFindsSixthPageAndRestoresId() throws Exception {
@@ -596,7 +628,7 @@ public class YearMonthNavigationDeviceTest {
             YearMonthRange month = selectedMonth();
             line.append(" month=").append(month == null ? "null" : month.label())
                     .append(" monthPaused=").append(field(current, "monthPaused"))
-                    .append(" monthDetailOpen=").append(field(current, "monthDetailOpen"))
+                    .append(" detailHandoff=").append(field(current, "monthDetailHandoff"))
                     .append(" pagingLoading=").append(state != null && state.isLoading())
                     .append(" pagingFailed=").append(state != null && state.hasFailed())
                     .append(" failure=").append(field(current, "photoFailureMessage"));
@@ -649,6 +681,71 @@ public class YearMonthNavigationDeviceTest {
         await(() -> selectedMonth() != null && selectedMonth().year == 2026 && selectedMonth().month == 9
                 && !Boolean.TRUE.equals(field(fragment(), "monthPaused")) && !paging().isLoading()
                 && containsMedia("1003") && containsMedia("1004") && "1004".equals(focusedId()));
+    }
+
+    @Test public void coveringDetailReturnBeforeMainResumesCancelsHeldMonthRestart() throws Exception {
+        fixture.targetOffset = 0;
+        choose(2026, 9);
+        await(() -> media().size() == 35 && !paging().isLoading());
+        openDetail(2);
+        await(() -> "1003".equals(field(detail, "displayedMediaId")) && !fragment().isResumed());
+        fixture.holdNextAlbum();
+        ui(() -> {
+            ((MediaPageController) field(detail, "pageController")).restart(new MediaPageController.Callback() {
+                @Override public void onReady(boolean available) { }
+                @Override public void onFailure() { }
+                @Override public void onPaused(String reason) { }
+            });
+            return null;
+        });
+        assertTrue(fixture.arrived.await(10, TimeUnit.SECONDS));
+        int beforeStop = fixture.albumRequests.get();
+        AtomicInteger mainResumes = new AtomicInteger();
+        Application application = (Application) instrumentation.getTargetContext().getApplicationContext();
+        Application.ActivityLifecycleCallbacks lifecycle = new Application.ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(Activity changed, Bundle state) { }
+            @Override public void onActivityStarted(Activity changed) { }
+            @Override public void onActivityResumed(Activity changed) {
+                if (changed instanceof MainActivity) mainResumes.incrementAndGet();
+                if (changed instanceof SettingsActivity) cover = changed;
+            }
+            @Override public void onActivityPaused(Activity changed) { }
+            @Override public void onActivityStopped(Activity changed) { }
+            @Override public void onActivitySaveInstanceState(Activity changed, Bundle state) { }
+            @Override public void onActivityDestroyed(Activity changed) { }
+        };
+        application.registerActivityLifecycleCallbacks(lifecycle);
+        try {
+            ui(() -> {
+                // Both calls are real Activity operations in the same UI task. Main
+                // cannot process a queued resume between recording return and covering it.
+                detail.finish();
+                assertTrue("Detail finish records a real pending return", detail.isFinishing());
+                assertNotNull(field(fragment(), "pendingReturnedPhoto"));
+                detail.startActivity(new Intent(detail, SettingsActivity.class));
+                return null;
+            });
+            await(() -> cover != null && cover.hasWindowFocus() && !activity.hasWindowFocus());
+            assertEquals("The covering Activity must arrive before any Main resume", 0, mainResumes.get());
+            await(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused")) && !paging().isLoading());
+            int responses = fixture.albumResponses.get();
+            fixture.release();
+            await(() -> fixture.albumResponses.get() > responses);
+            assertEquals("Delayed response cannot start work behind the covering Activity",
+                    beforeStop, fixture.albumRequests.get());
+            assertTrue("Canceled response cannot populate a wall that has not resumed", ui(() -> media().isEmpty()));
+            screenshot("detail-return-covered-before-main-resume");
+            ui(() -> { cover.finish(); return null; });
+            await(() -> activity.hasWindowFocus() && fragment().isResumed() && selectedMonth() != null
+                    && selectedMonth().year == 2026 && selectedMonth().month == 9);
+            assertTrue("Foregrounding still requires explicit month continuation",
+                    ui(() -> Boolean.TRUE.equals(field(fragment(), "monthPaused"))));
+            assertTrue(ui(() -> containsMedia("1003")));
+            assertEquals(beforeStop, fixture.albumRequests.get());
+            screenshot("covered-detail-return-retains-paused-anchor");
+        } finally {
+            application.unregisterActivityLifecycleCallbacks(lifecycle);
+        }
     }
 
     @Test public void favoriteWriteBackKeepsMonthAndSharedDetailNeverWritesCollect() throws Exception {
